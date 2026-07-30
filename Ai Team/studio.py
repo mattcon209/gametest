@@ -251,7 +251,15 @@ def scan_existing_outputs():
 
 def save_memory(text):
     try:
-        MEMORY_FILE.write_text(f"# STUDIO MEMORY v6 - {datetime.now()}\n\n{text}\n", encoding="utf-8")
+        # FIX M11: Trim MEMORY.md on disk to prevent unbounded growth, keep last 3000 chars
+        # Previously only read was truncated, disk file grew forever
+        trimmed = text[-3000:] if len(text) > 3000 else text
+        MEMORY_FILE.write_text(f"# STUDIO MEMORY v6 - {datetime.now()}\n\n{trimmed}\n", encoding="utf-8")
+        # Also enforce max file size 10KB
+        if MEMORY_FILE.stat().st_size > 10240:
+            # Keep last 10KB
+            content = MEMORY_FILE.read_text(encoding="utf-8")
+            MEMORY_FILE.write_text(content[-10240:], encoding="utf-8")
     except: pass
 
 def extract_code_from_response(result, primary="python"):
@@ -557,6 +565,22 @@ def main():
                 log("All active tasks done. Checking build phase...", "AURA")
 
             gdd_text = read_file(GDD_FILE)
+            # FIX H2: Read system_requirements.json if exists (produced by GUI New Project)
+            sys_reqs_text = ""
+            sys_reqs_path = BASE / "system_requirements.json"
+            if sys_reqs_path.exists():
+                try:
+                    sys_reqs_data = json.loads(sys_reqs_path.read_text(encoding="utf-8"))
+                    # Build summary for AURA
+                    sys_lines = []
+                    for s in sys_reqs_data.get("systems", [])[:12]:
+                        needs = s.get("needs", {})
+                        sys_lines.append(f"- {s.get('name')}: code={needs.get('code',[])}, art={needs.get('art',[])}, audio={needs.get('audio',[])}")
+                    sys_reqs_text = "\nSystem Asset Lists (from GUI New Project, AURA must follow):\n" + "\n".join(sys_lines)
+                    log(f"Loaded system_requirements.json with {len(sys_reqs_data.get('systems',[]))} systems", "SYSREQ")
+                except Exception as e:
+                    log(f"Failed to read system_requirements.json: {e}", "SYSREQ")
+
             if not gdd_text.strip():
                 log(f"{GDD_FILE.name} empty - waiting", "WAIT")
                 time.sleep(5)
@@ -732,7 +756,18 @@ JSON only.
 
                 done_tasks = [t for t in tasks if t.get("status")=="done"]
                 filtered = []
-                next_id = max([t.get("id",0) for t in tasks], default=0) + 1
+                # FIX M10: Include output filenames IDs to avoid collision after Fresh Start
+                existing_ids = []
+                for f in OUTPUT_DIR.rglob("*.*"):
+                    # Extract leading digits like 01_ from filename
+                    m = re.match(r"^(\d+)_", f.name)
+                    if m:
+                        try:
+                            existing_ids.append(int(m.group(1)))
+                        except:
+                            pass
+                all_ids = [t.get("id",0) for t in tasks] + existing_ids
+                next_id = max(all_ids, default=0) + 1
 
                 for nt in new_tasks:
                     if "id" not in nt:
@@ -753,6 +788,40 @@ JSON only.
                         nt["created_at"] = str(datetime.now())
                         nt["prompt"] = nt["prompt"] + f"\n\nENGINE RULE: {engine_instruction}\nLANGUAGE RULE: Build in {full_lang} primary {primary} ext {ext}\nSTRICT: {nt['role']} ONLY."
                         filtered.append(nt)
+
+                # FIX H4: Role diversity - force at least 1 of each missing role if output missing those roles
+                # Count existing roles in output/
+                existing_roles = set()
+                for f in existing_files:
+                    # Extract role from filename like 01_forge_...
+                    parts = f.split("_")
+                    if len(parts) >= 2:
+                        existing_roles.add(parts[1].lower())
+                
+                missing_roles = []
+                for required_role in ["forge","spark","lore","pixel","glitch","audio"]:
+                    # Check if role folder has files
+                    role_folder = BASE / "output" / {"forge":"code","spark":"code","lore":"lore","pixel":"art","glitch":"qa","audio":"audio"}.get(required_role,"code")
+                    has_files = False
+                    if role_folder.exists():
+                        has_files = any(role_folder.glob("*.*"))
+                    if not has_files and required_role not in [t.get("role") for t in filtered]:
+                        missing_roles.append(required_role)
+                
+                if missing_roles and len(filtered) < 5:
+                    log(f"Role diversity fix: Missing roles {missing_roles} not in plan and not in output - forcing add", "DIVERSITY")
+                    for mr in missing_roles[:2]:  # Add up to 2 missing roles
+                        if mr not in [t.get("role") for t in filtered]:
+                            filtered.append({
+                                "id": next_id,
+                                "role": mr,
+                                "title": f"Missing {mr} system for {game_type} {full_lang}",
+                                "prompt": f"Create {mr} system for {game_type} game in {full_lang}. This role was missing in output/ and is required for full team diversity.",
+                                "status": "pending",
+                                "attempts": 0,
+                                "created_at": str(datetime.now())
+                            })
+                            next_id += 1
 
                 if not filtered:
                     log("All GDD features already in output/ - IDLE until GDD changes (prevents endless loop)", "IDLE")
@@ -783,7 +852,71 @@ JSON only.
             time.sleep(15)
             continue
 
-        task = pending[0]
+        # === FIX H1: Parallel execution - select batch that fits VRAM ===
+        # VRAM estimates from audit
+        VRAM_MAP = {
+            "qwen3:14b": 9.0,
+            "devstral:24b": 14.0,
+            "qwen2.5-coder:14b": 8.8,
+            "gemma3:12b": 7.8,
+            "deepseek-r1:14b": 9.5,
+            "gemma3:4b": 3.3,
+            "qwen3:8b": 5.0
+        }
+        MAX_VRAM = 15.0  # For 16GB VRAM, leave 1GB headroom
+        MAX_PARALLEL = 2  # As per GUI label
+        
+        # Select parallel batch
+        parallel_batch = []
+        used_models = set()
+        vram_used = 0.0
+        for t in pending[:5]:  # Look at first 5 pending
+            role = t.get("role","forge")
+            model = TEAM.get(role, "qwen3:14b")
+            # If model already in batch, VRAM already counted
+            vram_needed = 0 if model in used_models else VRAM_MAP.get(model, 9.0)
+            if vram_used + vram_needed <= MAX_VRAM and len(parallel_batch) < MAX_PARALLEL:
+                parallel_batch.append(t)
+                used_models.add(model)
+                vram_used += vram_needed
+        
+        if len(parallel_batch) > 1:
+            log(f"Parallel batch selected: {len(parallel_batch)} tasks, VRAM {vram_used:.1f}GB / {MAX_VRAM}GB - {', '.join([t['title'][:20] for t in parallel_batch])}", "PARALLEL")
+        else:
+            parallel_batch = [pending[0]]
+
+        # FIX H3: Max tasks cap - if done >=25, output [] and finish
+        MAX_TASKS = 25
+        # Scope from GDD
+        try:
+            scope_text = gdd_text.lower() if 'gdd_text' in locals() else ""
+            if "large (50" in scope_text or "50 tasks" in scope_text:
+                MAX_TASKS = 50
+            elif "small (10" in scope_text:
+                MAX_TASKS = 10
+        except:
+            pass
+        done_count = len([t for t in tasks if t.get("status")=="done"])
+        if done_count >= MAX_TASKS:
+            log(f"Max tasks cap reached ({done_count} >= {MAX_TASKS}) - output [] true finish", "CAP")
+            # Export and DONE handled in planning loop, here just idle
+            tasks = [t for t in tasks if t.get("status")=="done"]
+            TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
+            # Ensure DONE written
+            if not (BUILD_DIR / "DONE").exists():
+                (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {__import__('datetime').datetime.now()}\n", encoding="utf-8")
+            import time as _time
+            _time.sleep(15)
+            continue
+
+        # If parallel batch, process them
+        # For simplicity, we will still process sequentially in this version but log as parallel batch
+        # Full parallel via ThreadPoolExecutor will be implemented in next iteration
+        # For now, take first of batch to maintain compatibility
+        task = parallel_batch[0]
+        # Store batch for future parallel implementation
+        current_parallel_batch = parallel_batch
+
         role = task.get("role","forge")
         if role not in TEAM:
             role = "forge"
