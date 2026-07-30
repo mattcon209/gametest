@@ -243,28 +243,27 @@ def detect_engine_mode(gdd_text):
         return "standard", "Follow Engine field in GDD exactly."
 
 def scan_existing_outputs():
-    """Scans output/ to prevent duplicate work - any language"""
+    """Scans output/ to prevent duplicate work - any language - FIXED M6: Only strip _XXXX random suffix from f.stem BEFORE _->space, not legit words like cafe"""
     existing = []
     existing_titles = set()
     if not OUTPUT_DIR.exists():
         return existing, existing_titles
-    # Any source extension for any language
     valid_exts = {".py",".cpp",".h",".hpp",".cs",".lua",".gd",".rs",".js",".ts",".go",".java",".shader",".md",".txt",".json"}
     for f in OUTPUT_DIR.rglob("*.*"):
         if f.is_file() and f.suffix.lower() in valid_exts:
             if f.stat().st_size < 10:
                 continue
-            name = f.stem.lower().replace("_"," ").replace("-"," ")
-            name = re.sub(r"^\d+\s+", "", name)
-            name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+", "", name)
-            # Remove random suffix like _A1B2
-            name = re.sub(r"_[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
-            name = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
+            stem = f.stem
+            stem = re.sub(r"_[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
+            stem = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
+            name = stem.lower().replace("_"," ").replace("-"," ")
+            name = re.sub(r"^\d+\s+","", name)
+            name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+","", name)
             existing.append(str(f.relative_to(BASE)))
             existing_titles.add(name.strip())
     return existing, existing_titles
 
-def save_memory(text):
+def save_memorydef save_memory(text):
     try:
         # FIX M11: Trim MEMORY.md on disk to prevent unbounded growth, keep last 3000 chars
         # Previously only read was truncated, disk file grew forever
@@ -966,6 +965,12 @@ JSON only.
             import concurrent.futures
 
             def process_one_task(t_item):
+                # FIX H1a Audit5: Move breaker + in_progress marking BEFORE call_ollama to stop 3 duplicate files
+                # Previously attempts incremented after success, so failing task would write file 3 times before breaker
+                if t_item.get("attempts",0) >= 3:
+                    return (t_item, None, "skipped_breaker")
+                t_item["status"] = "in_progress"
+                t_item["attempts"] = t_item.get("attempts",0) + 1
                 # Isolated processing for one task - no shared state except file writes which are unique due to random suffix
                 role = t_item.get("role","forge")
                 model = TEAM.get(role, "qwen3:14b")
