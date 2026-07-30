@@ -1,0 +1,121 @@
+========================================
+HOW IT WORKS - Answers to Your 3 Questions
+Ai Team v2 - Supervised Autonomous Studio
+========================================
+
+Q1: Does the coordinator still check on what the other models are doing to ensure they aren't deviating or going haywire?
+
+YES - v2 has a SUPERVISOR VALIDATION step that v1 didn't have.
+
+Old v1: AURA plans -> workers build -> done (no check)
+New v2: AURA plans -> worker builds -> AURA RE-LOADS and VALIDATES -> PASS or FAIL
+
+Flow per task:
+[14:32:45] FORGE finishes Save System -> saves to output/code/01_forge_Save_System.gd
+[14:32:46] AURA loads (qwen3:14b) - reads GDD + task + FORGE output
+[14:32:50] AURA outputs: {"verdict":"FAIL", "reason":"Wrote dialogue instead of code, overstepped to LORE role", "fix":"Rewrite as GDScript only, no story"}
+[14:32:51] Task re-queued with fix prompt
+[14:32:51] FORGE reloads with correction
+
+So coordinator DOES double-check every single file. If haywire, it catches and re-assigns. Validation is in studio.py lines 170-210.
+
+---
+
+Q2: How does coordinator keep track of full team + document if it's constantly shut down/restarted?
+
+This is the key insight: It does NOT keep memory in RAM/VRAM - it keeps memory in FILES.
+
+Think like a human manager who leaves room, writes notes, comes back later and reads notes to remember.
+
+Files = Permanent brain:
+- GDD.md = Single source of truth (game vision) - Coordinator reads this EVERY time it wakes
+- tasks.json = Team todo list + status (pending/done/failed) - External task memory
+- memory.md = Coordinator's summary notes (e.g., "Completed save system, fishing mini-game next, player wants scarier tone")
+- output/ folder = Actual work done
+- logs.txt = History
+
+When AURA is unloaded from VRAM to make room for FORGE (14GB), its memory file stays on disk. When AURA loads again 2 minutes later, first thing it does is:
+  read_file(GDD.md)
+  read_file(tasks.json)
+  read_file(memory.md)
+  read_file(last 5 outputs)
+
+So it wakes up with FULL context, even though it was completely shut down. This is actually MORE reliable than keeping it in VRAM, because VRAM context window is limited to 8k-128k tokens, but file memory is unlimited and survives PC reboots.
+
+If your PC crashes mid-task, you run 2. Start Team.bat again and it resumes exactly where left off because tasks.json remembers.
+
+---
+
+Q3: How are prompts transferred without overstepping?
+
+Isolation via tasks.json + role-specific system prompts:
+
+tasks.json example:
+[
+  {"id":1, "role":"forge", "title":"Save System", "prompt":"Build JSON save system..."},
+  {"id":2, "role":"lore", "title":"NPC Dialogue", "prompt":"Write harbor keeper..."}
+]
+
+When FORGE runs, worker_prompt = ONLY:
+  - GDD snippet (3500 chars, not full chat history)
+  - HIS task title + prompt
+  - HIS role file: roles/forge.txt says "You ONLY write engine code, DO NOT write dialogue/lore/art"
+
+FORGE never sees LORE's prompt. SPARK never sees PIXEL's prompt. Each worker is blind to others, only Coordinator sees all.
+
+Plus enforcement added to every task:
+  "STRICT: You are forge ONLY. Do not do other roles' work."
+
+So if LORE tries to write code, validation catches it as FAIL and re-queues.
+
+---
+
+ACTIVE LOG - Your Last Request:
+
+You said you don't want to check text file. Fixed.
+
+2. Start Team.bat IS the active scrolling live log. When you double-click it, its CMD window scrolls in real-time:
+
+[14:32:10] [AURA] Planning...
+[14:32:45] [AURA] Planned 5 tasks
+[14:32:45] [DELEGATE] -> [FORGE] Save System with devstral:24b
+[14:32:46] [LOAD] Loading devstral:24b...
+[14:33:20] [DONE] FORGE DONE -> output/code/01_forge_Save_System.gd
+[14:33:20] [VALIDATE] AURA validating...
+[14:33:25] [PASS] Validation PASS
+[14:33:25] [DELEGATE] -> [SPARK] Fishing mini-game...
+
+No need to open logs.txt.
+
+3. Live Log Viewer.bat is for second monitor - PowerShell tails logs.txt live with -Wait, auto-scrolls.
+
+---
+
+FOLDER STRUCTURE - "Ai Team" (At top due to 1. 2. 3. naming):
+
+Ai Team/
+  1. Install & Setup.bat        <- Double-click ONCE to install Ollama + 5 models (50GB), does NOT start team
+  2. Start Team.bat             <- Double-click to START autonomous team + live scrolling log IS this window
+  3. Live Log Viewer.bat        <- Double-click on second monitor for live tail of logs.txt
+  GDD.md                        <- PROMPT FILE - Edit this, team re-plans when you save
+  INBOX.txt                     <- Drop quick orders from phone: echo Add boss > INBOX.txt
+  PAUSE                         <- Create to pause, delete to resume
+  memory.md                     <- Coordinator's persistent memory (file-based brain)
+  tasks.json                    <- Team task list (file-based task memory)
+  logs.txt                      <- Full log file
+  live_status.txt               <- Current line status
+  studio.py                     <- The actual autonomous brain (v2 with validation)
+  roles/                        <- 6 role prompts (aura, forge, spark, lore, pixel, glitch)
+  output/code/, lore/, art/, qa/
+  docs/                         <- Your original LLM lists
+
+USAGE FROM PHONE (after setup):
+cd "C:\path\to\Ai Team"
+2. Start Team.bat   (team runs independently)
+# in second CMD:
+type logs.txt
+echo Make game scarier > INBOX.txt
+echo pause > PAUSE
+del PAUSE
+
+After setup, 100% offline - works in airplane mode.

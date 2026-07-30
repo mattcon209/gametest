@@ -1,0 +1,63 @@
+=== FINAL AUDIT ===
+Date: Wed Jul 29 01:11:56 UTC 2026
+
+Top 4 files at top (should be 1.,2.,3.,4.):
+1. Install and Setup.bat
+2. Start Team.bat
+3. Live Log Viewer.bat
+4. GDD.md
+AUDIT_REPORT.txt
+HOW IT WORKS - Answers to Your Questions.txt
+INBOX.txt
+MEMORY.md
+__pycache__
+docs
+live_status.txt
+logs.txt
+output
+roles
+studio.py
+tasks.json
+tools
+
+Python syntax:
+PASS - studio.py compiles
+
+Model names validated against ollama.com library:
+ - qwen3:14b - EXISTS, 9GB, general [verified]
+ - devstral:24b - EXISTS, 14GB, 987K pulls [search result]
+ - qwen2.5-coder:14b - EXISTS, coder series [verified]
+ - gemma3:12b - EXISTS, 8.1GB, multimodal [verified]
+ - deepseek-r1:14b - EXISTS, 9.0GB, reasoning [verified]
+
+Bugs Found and Fixed:
+1. [FIXED] GDD.md renamed to 4. GDD.md per your request - studio.py now checks both old and new names via get_gdd_path()
+2. [FIXED] 1. Install & Setup.bat had & char risky for CMD parsing - renamed to '1. Install and Setup.bat'
+3. [FIXED] 1. Install & Setup.bat had leftover 'if not exist GDD.md' old reference - removed, now migrates legacy file
+4. [FIXED] 2. Start Team.bat referenced old '1. Install & Setup.bat' with & - fixed to quoted new name
+5. [FIXED] MEMORY.md vs memory.md case mismatch - standardized to MEMORY.md uppercase, studio.py updated
+6. [FIXED] Batch echo lines with > needed ^ escaping for phone remote use - verified escaping correct
+7. [CHECKED] No placeholders TODO/FIXME left - clean
+8. [CHECKED] No hardcoded absolute C: paths that would break portability (except safe USERPROFILE mention)
+9. [CHECKED] All role files exist (aura, forge, spark, lore, pixel, glitch)
+10. [CHECKED] Output folders auto-created both in .bat and .py - redundant safe
+
+Active Log Implementation:
+- 2. Start Team.bat IS the live scrolling log (real-time prints)
+- 3. Live Log Viewer.bat uses PowerShell Get-Content -Wait -Tail 50 for second monitor
+- live_status.txt overwritten each action for ultra-fast status check from phone
+
+Supervisor Validation (Your Q1):
+- Implemented in studio.py - After each worker, AURA validates PASS/FAIL via JSON, re-queues if FAIL with correction
+
+File Memory Persistence (Your Q2):
+- GDD, tasks.json, MEMORY.md, output/ used as external brain - survives unload/restart
+
+Prompt Isolation (Your Q3):
+- tasks.json assigns single role, worker gets only its system prompt + its task + GDD snippet, not other roles
+
+Remaining Notes:
+- Model downloads ~50GB total, needs stable internet once, then 100% offline
+- Sequential execution (one model at a time) fits 16GB VRAM RTX 5060 Ti - Ollama auto-unloads
+- PAUSE file mechanism works: create empty file named PAUSE to pause, delete to resume
+- INBOX.txt mechanism works: echo text > INBOX.txt from phone to send new directive to Director

@@ -1,0 +1,80 @@
+# AI GAME TEAM - 100% CMD INSTALL (For Windows + RTX 5060 Ti)
+# Copy-paste these into CMD (run as Administrator)
+
+# ============================================================
+# STEP 1: INSTALL OLLAMA (The model switcher + runner)
+# ============================================================
+# Try winget first (Windows 11 has it):
+winget install Ollama.Ollama --silent --accept-package-agreements --accept-source-agreements
+
+# If winget fails, use this PowerShell one-liner instead:
+powershell -Command "Invoke-WebRequest -Uri https://ollama.com/download/OllamaSetup.exe -OutFile $env:TEMP\OllamaSetup.exe; Start-Process -Wait -FilePath $env:TEMP\OllamaSetup.exe -ArgumentList '/S'"
+
+# Close CMD and reopen it after install, then verify:
+ollama --version
+
+# ============================================================
+# STEP 2: PULL YOUR TEAM (This is the big download - ~50GB total)
+# Needs internet ONCE. After this, 100% offline/airplane mode works.
+# Run one at a time - you can do this from your phone
+# ============================================================
+ollama pull qwen3:14b
+ollama pull devstral:24b
+ollama pull qwen2.5-coder:14b
+ollama pull gemma3:12b
+ollama pull deepseek-r1:14b
+
+# LIGHTWEIGHT VERSION if you have 5060 Ti 8GB VRAM (use these instead):
+# ollama pull qwen3:8b
+# ollama pull devstral:24b-q3_K_M
+# ollama pull qwen2.5-coder:7b
+# ollama pull gemma3:4b
+# ollama pull deepseek-r1:7b
+
+# ============================================================
+# STEP 3: VERIFY TEAM IS READY
+# ============================================================
+ollama list
+ollama ps
+
+# ============================================================
+# STEP 4: USE YOUR TEAM - 100% CMD EXAMPLES
+# ============================================================
+# The switcher is Ollama itself - just call a different model and it auto-loads/unloads VRAM
+
+# Talk to AURA (Game Director - qwen3):
+ollama run qwen3:14b "You are AURA, Game Director. Design a core loop for a 2D roguelite fishing game with a time-loop."
+
+# Talk to FORGE (Lead Programmer - devstral):
+ollama run devstral:24b "You are FORGE, Senior Engine Programmer. Write a modular C# player controller for Unity with dash and time-rewind."
+
+# Talk to SPARK (Gameplay Scripter - qwen2.5-coder):
+ollama run qwen2.5-coder:14b "You are SPARK, Gameplay Scripter. Write 80 lines of GDScript for a fishing bite mini-game."
+
+# Talk to LORE (Writer - gemma3):
+ollama run gemma3:12b "You are LORE, Narrative Designer. Write 5 variations of dialogue for a harbor keeper who remembers time loops."
+
+# Talk to PIXEL (Tech Artist - same gemma3 with different prompt):
+ollama run gemma3:12b "You are PIXEL, Tech Artist. Write a Godot shader for water with shimmer effect."
+
+# Talk to GLITCH (QA - deepseek-r1) - thinks longer:
+ollama run deepseek-r1:14b "You are GLITCH, QA Lead. Find 3 bugs in this code: [paste code]"
+
+# ============================================================
+# HELPER COMMANDS FOR REMOTE PHONE USE
+# ============================================================
+# See what's loaded in VRAM right now:
+ollama ps
+
+# Force unload a model to free VRAM:
+ollama stop devstral:24b
+ollama stop qwen3:14b
+
+# Chat interactively (type /bye to exit and unload):
+ollama run qwen3:14b
+
+# Run a prompt without entering chat (one-shot - good for remote):
+ollama run gemma3:12b "Write a quest description" --verbose
+
+# Check VRAM usage (Nvidia):
+nvidia-smi

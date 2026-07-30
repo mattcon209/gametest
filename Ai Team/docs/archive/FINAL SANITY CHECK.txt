@@ -1,0 +1,86 @@
+Ai Team - FINAL FULL SANITY CHECK
+Date: Wed Jul 29 01:17:46 UTC 2026
+Location: /home/user/Ai Team
+================================================
+
+
+--- TOP 4 FILES CHECK ---
+[PASS] 1. Install and Setup.bat exists at top
+[PASS] 2. Start Team.bat exists at top
+[PASS] 3. Live Log Viewer.bat exists at top
+[PASS] 4. GDD.md exists at top
+
+--- FILESYSTEM ---
+[PASS] Dir output/code exists
+[PASS] Dir output/lore exists
+[PASS] Dir output/art exists
+[PASS] Dir output/qa exists
+[PASS] Dir roles exists
+[PASS] Dir docs exists
+[PASS] Dir tools exists
+[PASS] File studio.py exists
+[PASS] File MEMORY.md exists
+[PASS] File INBOX.txt exists
+[PASS] File tasks.json exists
+[PASS] File logs.txt exists
+[PASS] File live_status.txt exists
+
+--- ROLE FILES CONTENT ---
+[PASS] roles/aura.txt has content (239 bytes)
+[PASS] roles/forge.txt has content (277 bytes)
+[PASS] roles/spark.txt has content (223 bytes)
+[PASS] roles/lore.txt has content (195 bytes)
+[PASS] roles/pixel.txt has content (206 bytes)
+[PASS] roles/glitch.txt has content (218 bytes)
+
+--- PYTHON SYNTAX & LOGIC ---
+[PASS] studio.py compiles (no syntax errors)
+GDD candidates found: ['/home/user/Ai Team/4. GDD.md']
+PASS get_gdd_path would find 4. GDD.md
+PASS tasks.json valid JSON []
+PASS studio.py imports (Path, json, urllib)
+[PASS] Python logic test passed
+
+--- BATCH FILES SYNTAX SANITY ---
+[PASS] 1. Install and Setup.bat does NOT auto-start team (correct)
+[PASS] 2. Start Team.bat DOES start studio.py (correct)
+[PASS] 3. Live Log Viewer.bat correctly tails logs.txt with -Wait
+[PASS] No risky & in filenames
+[PASS] 1. Install and Setup.bat non-empty
+[PASS] 2. Start Team.bat non-empty
+[PASS] 3. Live Log Viewer.bat non-empty
+
+--- GDD PROMPT FILE CHECK ---
+[PASS] 4. GDD.md contains header
+[PASS] 4. GDD.md has substantial content (>20 lines)
+[PASS] 4. GDD.md no placeholder (template okay)
+
+--- MODEL NAMES CHECK (offline) ---
+[PASS] Model qwen3:14b referenced in project
+[PASS] Model devstral:24b referenced in project
+[PASS] Model qwen2.5-coder:14b referenced in project
+[PASS] Model gemma3:12b referenced in project
+[PASS] Model deepseek-r1:14b referenced in project
+
+--- NO HARDCODED OLD PATHS ---
+[PASS] No hardcoded C:\Ai Team absolute paths
+[PASS] No broken old GDD.md references (all point to 4. GDD.md)
+
+--- PLACEHOLDER SCAN ---
+[PASS] No TODO/FIXME/PLACEHOLDER markers in code
+
+--- ACTIVE LOG IMPLEMENTATION ---
+[PASS] studio.py has real-time flush log (active scrolling)
+[PASS] live_status.txt exists for phone status check
+
+--- SUPERVISOR VALIDATION LOGIC ---
+[PASS] studio.py has validation logic (PASS/FAIL)
+
+--- FILE MEMORY PERSISTENCE ---
+[PASS] studio.py uses file memory (tasks.json, MEMORY.md, GDD)
+
+--- SUMMARY ---
+Passed: 47
+Failed: 0
+
+RESULT: ALL GOOD - READY TO GO ✅
