@@ -6,16 +6,18 @@ Method: read every file, trace against Audits 1–5 + spec docs, then PROVE ever
 claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 ================================================================================
 
->>> CURRENT STATE: PART 8 is the newest section — read it first.
+>>> CURRENT STATE: PART 10 is the newest section — read it first.
 >>> This file is append-only and layered. Later parts supersede earlier ones:
 >>>   Parts 0–5  v6.7 fix-round report (written at 537af98)
 >>>   Part 6     independent audit #6 + repair (at 470cf20)
 >>>   Part 7     audit round 7 + repair (at 18817a1)
->>>   Part 8     independent audit #8 + repair (at HEAD) <- CURRENT
+>>>   Part 8     independent audit #8 + repair (at 865c831)
+>>>   Part 9     audit round 9 + repair (at 74b0164)
+>>>   Part 10    independent audit #10 + hardening (at HEAD) <- CURRENT
 >>> Each part re-verified the one before it by execution. Where they disagree,
 >>> the HIGHER-numbered part is newer and was re-tested.
->>> Before changing anything read: 8.2 (what was wrong), 8.4 (still open),
->>> 6.5 + 8.5 (standing advice).
+>>> Before changing anything read: 10.2 (findings), 10.4 (still open),
+>>> 6.5 + 8.5 + 10.5 (standing advice).
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -547,7 +549,7 @@ Everything from 6.4 not restated here still applies; nothing was hidden.
 
 ================================================================================
 ================================================================================
-PART 8 — INDEPENDENT AUDIT #8 + REPAIR (newest section)
+PART 8 — INDEPENDENT AUDIT #8 + REPAIR (audited 18817a1 / Part 7)
 Auditor: Arena agent (author of Audits 1–7)
 Audited: 18817a1 ("Audit7 repair: validate-before-write, true resume, M9 size
 gate, GUI detection wiring") · Repaired and pushed same day
@@ -800,4 +802,150 @@ V5  N2 unit: trim proven. N3: export None-contract + gate-by-return verified.
   worst-case on a slow model load).
 - M8: closed-by-design (8.4 + Part 7 R6); do not scaffold it.
 Everything from 8.4 not restated here still applies.
+================================================================================
+
+
+================================================================================
+================================================================================
+PART 10 — INDEPENDENT AUDIT #10 + HARDENING (newest section)
+Auditor: Arena agent (author of Audits 1–8)
+Audited: 74b0164 ("Audit9 repair: idle-watch, log rolling trim, cap-export DONE
+gating, directive dedupe, call telemetry") = Part 9 · Hardened at HEAD
+Method: fresh clone, full diff review, then PROVE every claim by execution —
+before/after measurement of the idle loop, three separate wake-path tests, a
+stranded-task probe, C++ end-to-end, and static reasoning on the concurrency
+of the new log trim. Nothing taken on trust.
+================================================================================
+
+--------------------------------------------------------------------------------
+10.0 — HEADLINE
+--------------------------------------------------------------------------------
+NO DEFECTS FOUND. All five Part 9 changes are correct and do what they claim.
+This is the second consecutive clean round (Part 7 was the first), and the
+first round where I had nothing to repair — only something to harden.
+
+Recording that plainly matters as much as recording failures: the pattern this
+file was created to catch (fixes shaped like the finding, logs asserting
+success that did not happen) did not occur here.
+
+--------------------------------------------------------------------------------
+10.1 — VERIFICATION OF PART 9 / 74b0164
+--------------------------------------------------------------------------------
+N1  IDLE WATCH — CONFIRMED, and it is a genuine resource fix, not cosmetics.
+    The old loop re-entered the planning gate every ~15s forever after a
+    finished build, loading the ~9GB director model each time just to receive
+    "[]". MEASURED, identical finished-state fixture, 65 seconds of idling:
+        old (865c831): 5 model loads, 5 IDLE lines
+        new (74b0164): 1 model load, then silence
+    On real hardware that is a 9GB model being paged for nothing, every 15s,
+    indefinitely. This is the "excessive looping" class SAFEGUARDS #8 names,
+    and sleeping alone never fixed it because the LLM call still happened.
+
+    WAKE PATHS — all three tested individually, all work:
+      · GDD edit        -> woke, snapshotted, replanned
+      · INBOX directive -> woke (forces gdd_changed by resetting mtime to 0)
+      · DONE deleted    -> woke and rebuilt (GUI Force Rebuild path)
+
+    STRANDING PROBE (the risk an early-exit gate creates): seeded a finished
+    build + DONE + one PENDING task, i.e. the state where a gate that ignores
+    the queue would hang. Result: task dispatched and completed normally,
+    attempts=1. Safe because idle_watch initialises False (first iteration
+    always runs the full flow) and is only set True at two points that both
+    require the queue to already be drained.
+
+    PAUSE is checked at loop top, ABOVE the gate, so pause still responds
+    within 15s while idling — better than during a long LLM call.
+
+N2  LOG ROLLING TRIM — CONFIRMED. logs.txt appended forever (MEMORY.md got a
+    disk cap rounds ago; logs never did). Trims to the last 3000 lines every
+    100 writes once past 1MB. Note for the record: _log_write_count is a module
+    global mutated from ThreadPoolExecutor workers without a lock. Worst case
+    is a missed or doubled modulo hit, so the trim runs a cycle late or twice —
+    idempotent and size-gated, therefore harmless. Not a defect; documented so
+    nobody "fixes" it with a lock that would serialise every log call.
+
+N3  CAP-EXPORT DONE GATING — CONFIRMED, and it closes a residual risk I raised
+    in Part 6.2: export_build() returns None on failure, but the old code wrote
+    DONE regardless, after which the DONE idempotency guard permanently blocked
+    the retry — a failed export was lost silently and forever. Now DONE is
+    written only when the export actually succeeded, with an explicit log on
+    failure and a retry next cycle.
+
+N4  DIRECTIVE DEDUPE — CONFIRMED. gui.send_directive() already wrote to
+    inbox_history.txt and studio appended again, duplicating every entry.
+    Dedupe checks the last 500 chars. Known and acceptable limit: an identical
+    directive re-sent much later WILL be appended again, which is arguably the
+    correct behaviour anyway.
+
+N5  CALL TELEMETRY — CONFIRMED live: "responded (60 chars, 0.0s, 600 c/s)".
+    Gives per-call wall time and a throughput proxy, which is what was missing
+    when diagnosing where a run's time actually goes (model load vs generate).
+
+Still holding at this HEAD (re-verified, not assumed): language matrix 11/11,
+validate-before-write, true resume, M9 gate, preflight tag-exact, .md <think>
+check, num_ctx/keep_alive/temperature asserted in-mock, C++ e2e produces real
+build/main.cpp, SMOKE ALL PASS, pyflakes 0, and the GDD read-only invariant —
+now 8 consecutive revisions with zero writes to GDD_FILE.
+
+--------------------------------------------------------------------------------
+10.2 — WHAT I CHANGED (1 hardening item, no defects to fix)
+--------------------------------------------------------------------------------
+C1  [HARDENING] IDLE-WATCH HEARTBEAT.
+    N1 is correct, but it makes a healthy idle system completely silent: no log
+    lines, and live_status.txt stops updating. From the outside, "watching
+    normally" and "hung / crashed / Ollama died" look identical — and this
+    system is meant to be left running unattended for hours.
+    Added a low-frequency heartbeat: one line roughly every 5 minutes
+    (every 20th 15s tick), never a model load.
+      "IDLE WATCH - build complete, no model loaded. Waiting on GDD edit /
+       INBOX / Force Rebuild (tick N)"
+    MEASURED over 70s of idling: 1 heartbeat line, 1 model load total — i.e.
+    observability restored WITHOUT recreating the spam N1 removed. The tick
+    counter resets whenever the system wakes.
+    This is deliberately not a "fix" — nothing was broken. It is the smallest
+    change that keeps N1's benefit while leaving the operator able to tell the
+    difference between idle and dead.
+
+--------------------------------------------------------------------------------
+10.3 — VERIFICATION RUN AT THIS HEAD
+--------------------------------------------------------------------------------
+V1  py_compile + pyflakes: studio.py, gui.py, tools/smoke_check.py -> 0 issues.
+V2  Idle measurement, before/after, identical fixture: 5 loads -> 1 load / 65s.
+V3  Wake paths: GDD edit, INBOX directive, DONE deletion - all three wake.
+V4  Stranded-task probe: pending task with DONE present ran to done, attempts=1.
+V5  C++ e2e: .cpp fragments, real build/main.cpp (marker string, not the
+    fallback placeholder), no <think> leaks, SMOKE ALL PASS.
+V6  Telemetry format confirmed live in the log output.
+V7  Heartbeat: 1 line + 1 model load across 70s of idling.
+
+--------------------------------------------------------------------------------
+10.4 — STILL OPEN (carried forward; nothing new added this round)
+--------------------------------------------------------------------------------
+· M8 — remains CLOSED-BY-DESIGN per Part 7 R6 and Part 8.4. Not re-raising it.
+· Oversized fragments can still land on the final M9 attempt, flagged with a
+  note. Deliberate anti-deadlock tradeoff.
+· max-parallel is effectively 1 whenever FORGE is queued first (devstral:24b
+  ~14GB against a 15GB budget). VRAM physics.
+· smoke_check compiles .py only; other languages get fence/<think>/non-trivial
+  guards but no syntax validation (no toolchains assumed on the target box).
+· GUI "Parallel: Running" label is still an estimate from pending>1, not a live
+  executor readout. (The status BAR is accurate; this one label is not.)
+· PAUSE granularity: honoured within 15s while idle, but up to one full LLM
+  call late mid-task. Unchanged, and N1 did not make it worse.
+
+--------------------------------------------------------------------------------
+10.5 — STANDING ADVICE (additions to 6.5 and 8.5, which still apply)
+--------------------------------------------------------------------------------
+11. Measure resource fixes, do not just read them. N1's value only became
+    concrete by running the SAME fixture on both revisions and counting model
+    loads (5 -> 1). "Looks better" is not a result on this codebase.
+12. Any early-exit gate added to the main loop must be probed for what it can
+    strand. The idle-watch gate ignores the pending queue entirely; it is safe
+    only because of where idle_watch gets set. If you add a third set-point,
+    re-run the stranded-task probe in 10.1 before you trust it.
+13. Silence is not success. When you make something stop logging, ask how an
+    operator distinguishes it from a crash — that is the whole of C1.
+14. A clean audit is a valid result. Two rounds in a row now had no defects.
+    Do not invent findings to justify the pass; record the verification, record
+    what is still open, and stop.
 ================================================================================

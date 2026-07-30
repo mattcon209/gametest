@@ -689,6 +689,7 @@ def main():
     # unchanged GDD + a non-empty queue skips planning and goes straight to the
     # workers. Replan only when the GDD actually changed, or the queue is empty.
     idle_watch = False  # N1: lightweight IDLE - no LLM calls while watching
+    idle_ticks = 0      # Audit10: heartbeat counter for the idle-watch state
     last_gdd_mtime = 0
     try:
         if STATE_FILE.exists():
@@ -739,8 +740,17 @@ def main():
         # directive (forces gdd_changed via mtime=0), or DONE being deleted
         # (Force Rebuild). No model is loaded while watching.
         if idle_watch and not gdd_changed and (BUILD_DIR / "DONE").exists():
+            # Audit10 hardening: N1 made idle silent, which is correct for VRAM but
+            # leaves no way to tell "watching, healthy" from "hung/crashed" - the
+            # log and the GUI status bar both just stop. Emit a low-frequency
+            # heartbeat (~every 5 min, not every 15s) so live_status.txt keeps
+            # updating without recreating the log spam N1 removed. No model loaded.
+            idle_ticks += 1
+            if idle_ticks % 20 == 1:
+                log(f"IDLE WATCH - build complete, no model loaded. Waiting on GDD edit / INBOX / Force Rebuild (tick {idle_ticks})", "IDLE")
             time.sleep(15)
             continue
+        idle_ticks = 0
         idle_watch = False  # something changed or no DONE - run the full flow
 
         existing_files, existing_titles = scan_existing_outputs()
