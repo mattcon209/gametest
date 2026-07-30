@@ -39,6 +39,8 @@ def get_gdd_path():
     return BASE / "5. GDD.md"
 
 def detect_from_gdd():
+    # FIX M4/M5: Import detection from studio.py instead of reimplementing divergent logic
+    # This ensures GUI and orchestrator agree on Engine/Language/Game Type
     p = get_gdd_path()
     txt = ""
     if p.exists():
@@ -46,34 +48,42 @@ def detect_from_gdd():
             txt = p.read_text(encoding="utf-8")
         except:
             txt = ""
-    # Defaults
-    lower = txt.lower()
-    engine = "Custom from scratch"
-    if "unity" in lower and "avoid unity" not in lower and "no unity" not in lower:
-        engine = "Unity"
-    elif "godot" in lower and "avoid godot" not in lower:
-        engine = "Godot"
-    elif "none" in lower and "engine:" in lower:
-        engine = "None"
-
-    lang = "Python"
-    if "language:" in lower:
+    try:
+        # Import from studio.py for single source of truth
+        import sys
+        sys.path.insert(0, str(BASE))
+        from studio import detect_language, detect_game_type, detect_engine_mode
+        full_lang, primary, ext, run_cmd = detect_language(txt)
+        gtype = detect_game_type(txt)
+        engine_mode, _ = detect_engine_mode(txt)
+        # Map engine_mode to display
+        engine = "Custom from scratch" if engine_mode == "custom" else "Standard"
+        # Try to get more specific from GDD ENGINE field
         for line in txt.splitlines():
-            if "language:" in line.lower():
-                lang = line.split(":",1)[1].strip()[:40]
+            if "engine:" in line.lower():
+                eng_line = line.split(":",1)[1].strip()[:40]
+                if eng_line:
+                    engine = eng_line
                 break
-
-    gtype = "2D"
-    if any(k in lower for k in ["3d", "tether", "ragdoll", "node3d"]):
-        gtype = "3D"
-    elif "text" in lower:
-        gtype = "Text"
-    elif "gui" in lower:
-        gtype = "GUI"
-    elif "2d pixel" in lower:
-        gtype = "2D Pixel"
-
-    return engine, lang, gtype, txt
+        return engine, full_lang, gtype, txt
+    except Exception as e:
+        # Fallback to old logic if import fails
+        lower = txt.lower()
+        engine = "Custom from scratch"
+        if "unity" in lower and "avoid unity" not in lower and "no unity" not in lower:
+            engine = "Unity"
+        elif "godot" in lower and "avoid godot" not in lower:
+            engine = "Godot"
+        lang = "Python"
+        if "language:" in lower:
+            for line in txt.splitlines():
+                if "language:" in line.lower():
+                    lang = line.split(":",1)[1].strip()[:40]
+                    break
+        gtype = "2D"
+        if any(k in lower for k in ["3d", "tether", "ragdoll"]):
+            gtype = "3D"
+        return engine, lang, gtype, txt
 
 class AiTeamGUIv2:
     def __init__(self, root):

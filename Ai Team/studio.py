@@ -122,48 +122,60 @@ def detect_language(gdd_text):
                 lang = parts[1].strip()[:50]
                 break
     
-    lower_lang = lang.lower()
-    # Use word boundaries to avoid substring collisions (M2 fix)
-    # e.g., "js" should not match inside "objects", "ts" should not match "assets"
+    # FIX M3: First listed language is primary - split by + and take first token
+    # e.g., "Python + C++" -> primary = Python, not C++ (old checked C++ first)
+    # e.g., "C++ + Lua" -> primary = C++ 
+    first_lang = lang.split("+")[0].strip().lower() if "+" in lang else lang.lower()
+    lower_first = first_lang  # Primary is first listed
+    lower_lang = lang.lower()  # Full string for secondary detection
+
     primary = "python"
     ext = ".py"
     run_cmd = "python main.py"
 
-    # Check in order of specificity, using regex \b for word boundaries where needed
-    # C++ must be checked before C# etc.
-    if re.search(r"\bc\+\+|\bcpp\b", lower_lang):
+    # Check primary (first listed) first, with word boundaries
+    if re.search(r"\bc\+\+|\bcpp\b", lower_first):
         primary = "cpp"
         ext = ".cpp"
         run_cmd = "g++ main.cpp -o game && game.exe"
-    elif re.search(r"\bc#\b|^\s*c#|csharp", lower_lang):
+    elif re.search(r"\bc#\b|^\s*c#|csharp", lower_first):
         primary = "csharp"
         ext = ".cs"
         run_cmd = "dotnet run"
-    elif re.search(r"\blua\b", lower_lang):
+    elif re.search(r"\blua\b", lower_first):
         primary = "lua"
         ext = ".lua"
         run_cmd = "lua main.lua"
-    elif re.search(r"\bgdscript\b|godot", lower_lang):
+    elif re.search(r"\bgdscript\b|godot", lower_first):
         primary = "gdscript"
         ext = ".gd"
         run_cmd = "godot --path . main.tscn"
-    elif re.search(r"\brust\b", lower_lang):
+    elif re.search(r"\brust\b", lower_first):
         primary = "rust"
         ext = ".rs"
         run_cmd = "cargo run"
-    elif re.search(r"\btypescript\b|\bts\b", lower_lang):
-        # Check TypeScript before JavaScript to avoid ts collision
+    elif re.search(r"\btypescript\b|\bts\b", lower_first):
         primary = "typescript"
         ext = ".ts"
         run_cmd = "npx ts-node main.ts"
-    elif re.search(r"\bjavascript\b|\bjs\b", lower_lang):
+    elif re.search(r"\bjavascript\b|\bjs\b", lower_first):
         primary = "javascript"
         ext = ".js"
         run_cmd = "node main.js"
-    elif re.search(r"\bpython\b", lower_lang):
+    elif re.search(r"\bpython\b", lower_first):
         primary = "python"
         ext = ".py"
         run_cmd = "python main.py"
+    else:
+        # Fallback: if first token didn't match, check full string in old order for secondary
+        if re.search(r"\bc\+\+|\bcpp\b", lower_lang):
+            primary = "cpp"
+            ext = ".cpp"
+            run_cmd = "g++ main.cpp -o game && game.exe"
+        elif re.search(r"\bpython\b", lower_lang):
+            primary = "python"
+            ext = ".py"
+            run_cmd = "python main.py"
     
     full_lang = lang
     return full_lang, primary, ext, run_cmd
@@ -242,9 +254,9 @@ def scan_existing_outputs():
             name = re.sub(r"^\d+\s+", "", name)
             name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+", "", name)
             # Remove random suffix like _A1B2
-            name = re.sub(r"\s+[a-f0-9]{4}$", "", name)
-            name = re.sub(r"\s+core\s+[a-f0-9]{4}$", "", name)
-            name = re.sub(r"\s+utils\s+[a-f0-9]{4}$", "", name)
+            name = re.sub(r"_[a-f0-9]{4}$", "", name)
+            name = re.sub(r"\s+core_[a-f0-9]{4}$", "", name)
+            name = re.sub(r"\s+utils_[a-f0-9]{4}$", "", name)
             existing.append(str(f.relative_to(BASE)))
             existing_titles.add(name.strip())
     return existing, existing_titles
@@ -394,7 +406,7 @@ def ensure_build_runnable(primary_ext, run_cmd, engine_mode, gdd_text):
     BUILD_DIR.mkdir(exist_ok=True)
     main_path = BUILD_DIR / f"main{primary_ext}"
 
-    if main_path.exists() and main_path.stat().st_size > 100:
+    if main_path.exists() and main_path.stat().st_size > 10:  # FIX N1: Lowered from 100 to 10, 44-char games valid
         return main_path
 
     # Language-specific fallbacks
@@ -710,6 +722,8 @@ GDD (READ ONLY):
 {gdd_text[:4500]}
 {inbox_part}
 
+{sys_reqs_text}
+
 OUTPUT INDEX - Already have (DO NOT RE-PLAN unless IMPROVE/REDO):
 {output_index}
 Titles: {titles_list}
@@ -721,7 +735,7 @@ ENGINE: {engine_mode} - {engine_instruction}
 LANGUAGE: {full_lang} primary {primary} ext {ext} - Build files must use {ext}
 GAME TYPE: {game_type}
 
-TASK: Plan ONLY missing features not in output index. 3-5 small isolated tasks max, must include diverse roles (at least 1 FORGE, 1 SPARK, 1 LORE, 1 PIXEL, 1 GLITCH if missing).
+TASK: Plan ONLY missing features not in output index, following system asset lists if present. 3-5 small isolated tasks max, must include diverse roles (at least 1 FORGE, 1 SPARK, 1 LORE, 1 PIXEL, 1 GLITCH if missing).
 Each task role: forge=engine/systems, spark=gameplay, lore=story, pixel=art, glitch=qa, audio=sfx, integrator is not for you to plan (system auto)
 Output ONLY JSON array: [{{"id":1,"role":"forge","title":"...","prompt":"..."}}] with title short, prompt detailed for language {full_lang}
 If all core features exist, output [].
@@ -836,6 +850,42 @@ JSON only.
                 continue
 
         pending = [t for t in tasks if t.get("status") in ["pending","failed"]]
+
+        # FIX N4/C-cap: Cap check must be above IDLE check to be reachable - was dead code before
+        # Parse scope from MEMORY or GDD
+        MAX_TASKS = 25
+        try:
+            mem_text = open(MEMORY_FILE, encoding="utf-8").read().lower() + " " + open(GDD_FILE, encoding="utf-8").read().lower()
+            if "large (50" in mem_text or "50 tasks" in mem_text:
+                MAX_TASKS = 50
+            elif "small (10" in mem_text:
+                MAX_TASKS = 10
+        except Exception:
+            pass
+        done_count = len([t for t in tasks if t.get("status")=="done"])
+        pending_count = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
+        if done_count >= MAX_TASKS:
+            # FIX N3: Idempotency - only export if DONE doesn't exist
+            if (BUILD_DIR / "DONE").exists():
+                log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached and DONE exists - IDLE (prevents disk-filler)", "CAP")
+                time.sleep(15)
+                continue
+            if pending_count == 0:
+                log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
+                if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
+                    from pathlib import Path as _P
+                    try:
+                        # Use export_build defined later, but call via function if exists
+                        export_build(f"CAP_{MAX_TASKS}")
+                    except Exception:
+                        pass
+                    if not (BUILD_DIR / "DONE").exists():
+                        (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {__import__('datetime').datetime.now()} - {done_count} tasks done", encoding="utf-8")
+                else:
+                    log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
+                time.sleep(15)
+                continue
+
         if not pending:
             if not (BUILD_DIR / "DONE").exists() and len(existing_files) >= 1:
                 time.sleep(2)
@@ -892,9 +942,12 @@ JSON only.
         done_count = len([t for t in tasks if t.get("status")=="done"])
         pending_count = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
         if done_count >= MAX_TASKS and pending_count == 0:
+            # FIX N3: Idempotency guard - only export once, not every 15s forever (would fill disk)
+            if (BUILD_DIR / "DONE").exists():
+                log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached and DONE already exists - IDLE (prevents disk-filler export loop)", "CAP")
+                time.sleep(15)
+                continue
             log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
-            # Do NOT delete pending (there are none), do NOT write false DONE without checking build exists first
-            # Export current build before going IDLE
             if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
                 export_build(f"CAP_{MAX_TASKS}")
                 if not (BUILD_DIR / "DONE").exists():
@@ -904,14 +957,116 @@ JSON only.
             time.sleep(15)
             continue
 
-        # If parallel batch, process them
-        # For simplicity, we will still process sequentially in this version but log as parallel batch
-        # Full parallel via ThreadPoolExecutor will be implemented in next iteration
-        # For now, take first of batch to maintain compatibility
-# parallel batch already handled above
-        task = pending[0]  # fallback to sequential if parallel not triggered
-        # Store batch for future parallel implementation
-        current_parallel_batch = parallel_batch
+        # FIX H1: True parallel execution via ThreadPoolExecutor - max 2 models in 16GB VRAM
+        # If parallel batch >1, process in parallel, else process single
+        if len(parallel_batch) > 1:
+            log(f"Executing parallel batch of {len(parallel_batch)} tasks in parallel (ThreadPoolExecutor)", "PARALLEL")
+            import concurrent.futures
+
+            def process_one_task(t_item):
+                # Isolated processing for one task - no shared state except file writes which are unique due to random suffix
+                role = t_item.get("role","forge")
+                model = TEAM.get(role, "qwen3:14b")
+                gdd_snip = read_file(GDD_FILE)[:3500]
+                full_l, prim, ext_, run_c = detect_language(gdd_snip)
+                eng_mode, eng_instr = detect_engine_mode(gdd_snip)
+                base_sys = SYSTEM.get(role,"")
+                if eng_mode == "custom":
+                    base_sys = base_sys.replace("Unity","custom engine").replace("Unreal","custom engine").replace("Godot","custom")
+                    base_sys += f"\n\n{eng_instr}\nSTRICTLY NO Unity/Unreal.\nLANGUAGE: {full_l} primary {prim} ext {ext_} - Must respect."
+                worker_prompt = f"""
+GDD (READ ONLY):
+{gdd_snip}
+
+TASK ({role} ONLY) in {full_l} primary {prim} ext {ext_}:
+Title: {t_item['title']}
+Details: {t_item['prompt']}
+
+ENGINE MODE: {eng_mode}
+{eng_instr}
+LANGUAGE: {full_l} primary {prim} ext {ext_} -> File must be *{ext_}
+GAME TYPE: {detect_game_type(gdd_snip)}
+
+RULES: Stay lane, respect engine+language+type, output file-ready result in {full_l}. Max 500 lines, 25KB, 100 chars line. GDD read-only.
+"""
+                result = call_ollama(model, base_sys, worker_prompt, 350)
+                if not result:
+                    return (t_item, None, "failed")
+                # Unique naming + extract
+                ext_to_use = ext_for_role(role, ext_)
+                folder_to_use = folder_for_role(role)
+                safe_file_title = "".join(c if c.isalnum() else "_" for c in t_item['title'])[:30]
+                rand_suf = random_suffix()
+                fname = f"{t_item.get('id',99):02d}_{role}_{safe_file_title}_{rand_suf}{ext_to_use}"
+                fpath = OUTPUT_DIR / folder_to_use / fname
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                cleaned = extract_code_from_response(result, prim)
+                if ext_to_use == ".md" and len(cleaned) < 50:
+                    cleaned = result
+                fpath.write_text(cleaned, encoding="utf-8")
+                return (t_item, (fpath, cleaned, result), "done")
+
+            # Execute parallel
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as executor:
+                future_to_task = {executor.submit(process_one_task, t): t for t in parallel_batch}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        task_item, res, status = future.result()
+                        results.append((task_item, res, status))
+                        log(f"Parallel task done: {task_item['title']} -> {status}", "PARALLEL")
+                    except Exception as e:
+                        t = future_to_task[future]
+                        log(f"Parallel task {t['title']} failed: {e}", "ERROR")
+                        results.append((t, None, "failed"))
+
+            # Save all results to tasks.json and validate each sequentially (AURA validation sequential to avoid VRAM spike)
+            for task_item, res, status in results:
+                # Find task in main tasks list
+                for tt in tasks:
+                    if tt.get("id") == task_item.get("id"):
+                        if status == "failed" or res is None:
+                            tt["status"] = "failed"
+                        else:
+                            tt["status"] = "done"
+                            tt["output_file"] = str(res[0])
+                            tt["attempts"] = tt.get("attempts",0)+1
+                        break
+            TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
+
+            # Validate each result sequentially
+            for task_item, res, status in results:
+                if status == "failed" or res is None:
+                    continue
+                fpath, cleaned, raw_result = res
+                gdd_snip = read_file(GDD_FILE)[:2000]
+                full_l, prim, ext_, run_c = detect_language(gdd_snip)
+                eng_mode, eng_instr = detect_engine_mode(gdd_snip)
+                validate_prompt = f"""GDD: {gdd_snip[:2000]}\nTask: {task_item['title']} Role: {task_item.get('role')} Expected: {task_item['prompt']}\nOutput: {raw_result[:3000]}\nCheck 1) role lane 2) engine 3) language\nOutput JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}"""
+                validation = call_ollama(TEAM["aura"], SYSTEM.get("aura",""), validate_prompt, 200)
+                try:
+                    if validation:
+                        import json as _json
+                        raw_v = validation
+                        s = raw_v.find("{")
+                        e = raw_v.rfind("}")+1
+                        if s != -1:
+                            raw_v = raw_v[s:e]
+                        v = _json.loads(raw_v)
+                        verdict = v.get("verdict","PASS").upper()
+                        if "FAIL" in verdict:
+                            for tt in tasks:
+                                if tt.get("id") == task_item.get("id") and tt.get("attempts",0) < 3:
+                                    tt["status"] = "pending"
+                                    tt["prompt"] = tt["prompt"] + f"\nCORRECTION: {v.get('fix')}"
+                        TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
+                except Exception as e:
+                    log(f"Validation parse fail parallel: {e}", "VALIDATE")
+            time.sleep(2)
+            continue
+        else:
+            # Sequential fallback - only one task in batch
+            task = pending[0]
 
         role = task.get("role","forge")
         if role not in TEAM:
