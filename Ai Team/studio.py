@@ -62,13 +62,23 @@ if "aura" not in SYSTEM:
 if "integrator" not in SYSTEM:
     SYSTEM["integrator"] = "You are INTEGRATOR final builder."
 
+_log_write_count = 0
+
 def log(msg, tag="INFO"):
+    global _log_write_count
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] [{tag}] {msg}"
     print(line, flush=True)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+        # N2: rolling trim. MEMORY.md got a disk cap earlier but logs.txt
+        # appended forever. Trim ~every 100 writes once past 1MB;
+        # GUI only tails the last 80 lines anyway.
+        _log_write_count += 1
+        if _log_write_count % 100 == 0 and LOG_FILE.exists() and LOG_FILE.stat().st_size > 1_000_000:
+            lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+            LOG_FILE.write_text("\n".join(lines[-3000:]) + "\n", encoding="utf-8")
     except: pass
     try:
         with open(BASE / "live_status.txt", "w", encoding="utf-8") as f:
@@ -139,10 +149,14 @@ def call_ollama(model, system_prompt, user_prompt, timeout=400):
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         log(f"Loading {model} ...", "LOAD")
+        _t0 = time.time()
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read().decode('utf-8'))
             content = result["message"]["content"]
-            log(f"{model} responded ({len(content)} chars)", "DONE")
+            _secs = time.time() - _t0
+            # N5: wall-time telemetry per call - shows where the run's time goes
+            # (model load vs generate) with a chars/sec throughput proxy
+            log(f"{model} responded ({len(content)} chars, {_secs:.1f}s, {len(content)/max(_secs,0.1):.0f} c/s)", "DONE")
             return content
     except urllib.error.URLError as e:
         log(f"Ollama not running? {e} - Start Ollama app or ollama serve", "ERROR")
@@ -674,6 +688,7 @@ def main():
     # system RE-PLANNED instead of resuming (audit 6.4). Now: restart with an
     # unchanged GDD + a non-empty queue skips planning and goes straight to the
     # workers. Replan only when the GDD actually changed, or the queue is empty.
+    idle_watch = False  # N1: lightweight IDLE - no LLM calls while watching
     last_gdd_mtime = 0
     try:
         if STATE_FILE.exists():
@@ -702,13 +717,31 @@ def main():
             except Exception:
                 pass
             try:
-                with open(INBOX_HISTORY, "a", encoding="utf-8") as f:
-                    f.write(f"\n[{datetime.now()}] {inbox}\n")
+                # N4: the GUI send_directive path already wrote this directive to
+                # the history; appending unconditionally duplicated every entry.
+                tail = read_file(INBOX_HISTORY)[-500:]
+                if inbox not in tail:
+                    with open(INBOX_HISTORY, "a", encoding="utf-8") as f:
+                        f.write(f"\n[{datetime.now()}] {inbox}\n")
             except: pass
 
         refresh_gdd_path()
         cur_mtime = GDD_FILE.stat().st_mtime if GDD_FILE.exists() else 0
         gdd_changed = cur_mtime != last_gdd_mtime
+
+        # N1 IDLE WATCH: after a finished build + empty plan, the old loop kept
+        # re-entering the planning gate every ~15s FOREVER - each cycle loaded
+        # the ~9GB director model just to receive "[]" (observed in e2e logs:
+        # qwen3:14b responding 2 chars every 15s indefinitely). That is VRAM
+        # churn, power draw, and log spam - the excessive-looping class
+        # SAFEGUARDS #8 names; sleep alone didn't help because the LLM call
+        # still happened. Watch cheaply: wake only on a GDD edit, an INBOX
+        # directive (forces gdd_changed via mtime=0), or DONE being deleted
+        # (Force Rebuild). No model is loaded while watching.
+        if idle_watch and not gdd_changed and (BUILD_DIR / "DONE").exists():
+            time.sleep(15)
+            continue
+        idle_watch = False  # something changed or no DONE - run the full flow
 
         existing_files, existing_titles = scan_existing_outputs()
         pending = [t for t in tasks if t.get("status") in ["pending","failed","in_progress"]]
@@ -848,6 +881,7 @@ Requirements:
                     except Exception as sc_err:
                         log(f"Smoke check could not run: {sc_err}", "SMOKE")
                     inbox_directive_global = ""
+                    idle_watch = True  # N1: DONE just written - enter cheap watch
                     time.sleep(10)
                     continue
 
@@ -988,6 +1022,8 @@ JSON only.
                     log("All GDD features already in output/ - IDLE until GDD changes (prevents endless loop)", "IDLE")
                     tasks = done_tasks
                     TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                    if (BUILD_DIR / "DONE").exists():
+                        idle_watch = True  # N1: nothing to plan + build finished
                     time.sleep(15)
                     continue
 
@@ -1028,9 +1064,14 @@ JSON only.
             if pending_count == 0:
                 log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
                 if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
-                    export_build(f"CAP_{MAX_TASKS}")
-                    if not (BUILD_DIR / "DONE").exists():
+                    # N3: export_build returns None on failure; the old code wrote
+                    # DONE anyway, and the DONE idempotency guard then permanently
+                    # blocked the retry - a failed export was lost silently.
+                    _cap_export = export_build(f"CAP_{MAX_TASKS}")
+                    if _cap_export is not None and not (BUILD_DIR / "DONE").exists():
                         (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
+                    elif _cap_export is None:
+                        log("Cap export FAILED - NOT writing DONE (would block the retry); will retry next cycle", "CAP")
                 else:
                     log("Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
                 time.sleep(15)

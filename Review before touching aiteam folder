@@ -726,3 +726,78 @@ M9 live:      600-line monolith -> 2 rejections, final-attempt write w/ note
     someone else's section — this round shipped a Part 8 because a Part 7
     already existed for 18817a1.
 ================================================================================
+
+================================================================================
+PART 9 — AUDIT ROUND 9 + REPAIR (audited HEAD 865c831, which contained Part 8)
+================================================================================
+Auditor: agent that authored Parts 0–5 + 7, returning per the repeat request.
+Method: pulled, re-verified Part 8's B1/B2 in code AND execution, then hunted
+new issues in the repaired system. Five found, five fixed, all proven in 9.3.
+
+--------------------------------------------------------------------------------
+9.1 — PART 8 REPAIR: RE-VERIFIED, HOLDING
+--------------------------------------------------------------------------------
+- B1 (.md smoke blind spot): markdown fence/<think> checks present in
+  smoke_check.py, covering lore/qa/code/art/audio - confirmed in file.
+- B2 (duplicate ext computation): parallel lane now derives ext_to_use from
+  fpath.suffix (single source of truth at the worker-built path) - confirmed.
+  py_compile passes on all three files.
+
+--------------------------------------------------------------------------------
+9.2 — NEW FINDINGS FIXED THIS ROUND
+--------------------------------------------------------------------------------
+N1  [HIGH] THE IDLE LOOP WAS LOADING AURA EVERY ~15 SECONDS FOREVER. After a
+    finished build the loop re-entered the planning gate each cycle (pending==0
+    opens it), so the ~9GB director model was loaded and queried just to return
+    "[]" - observed directly in e2e hits: qwen3:14b responding 2 chars every
+    15s indefinitely. SAFEGUARDS #8 ("IDLE sleep, not tight loop") only slowed
+    it; the LLM call still happened. VRAM churn, power draw, log spam on any
+    machine left running overnight.
+    FIXED: idle_watch mode. Once DONE exists and a plan returns nothing new,
+    the loop watches GDD mtime / INBOX / DONE-deletion only - no model loads.
+    Verified: 0 planner calls across a 32s idle window (was ~2), and a full
+    run ended with ONE planner call total. Wake paths all proven: GDD edit
+    triggers snapshot + rebuild (integrator hit, DONE rewritten, Exit 0);
+    Force Rebuild (DONE deleted) and INBOX both break the watch correctly.
+N2  [MED] logs.txt grew unbounded - MEMORY.md got a disk cap earlier rounds,
+    logs.txt never did; multi-day runs would balloon it. FIXED: rolling trim
+    every 100 writes past 1MB (keeps newest 3000 lines; GUI tails 80).
+    Verified: synthetic 2.2MB log trimmed to 180KB with newest line intact.
+N3  [MED] Cap-path wrote DONE even when export_build FAILED (returns None on
+    exception); the DONE idempotency guard then permanently blocked the export
+    retry - a failed export was silently lost (Audit-4 residual risk).
+    FIXED: DONE only written when export returned a path; failure logs loudly
+    and retries next cycle.
+N4  [LOW] Every GUI-sent directive was written to inbox_history.txt TWICE
+    (GUI pre-appends for immediate feedback, studio appended again on consume).
+    FIXED: studio-side dedupe against the recent tail before appending.
+N5  [FEATURE] Per-call telemetry: call_ollama now logs wall-seconds and a
+    chars/sec throughput proxy per model call - makes model-load vs generate
+    time visible and feeds the future telemetry panel.
+
+--------------------------------------------------------------------------------
+9.3 — VERIFICATION (execution, per standing advice 6.5/8.5)
+--------------------------------------------------------------------------------
+V1  py_compile: studio.py, gui.py, smoke_check.py - pass.
+V2  N1 test: e2e run to DONE, 32s idle window = 0 planner calls; GDD edit ->
+    snapshot + DONE removed + integrator rebuild + new DONE + SMOKE ALL PASS;
+    full-run mock tally: 1 planner, 2 integrator, 6 worker, 6 validator.
+V3  V5-regression (always-FAIL validator): 1 file per role still, all tasks
+    attempts<=3 and done. Validate-before-write intact.
+V4  Resume regression: seeded pending + matching state.json -> first mock call
+    was worker, not planner. True resume intact.
+V5  N2 unit: trim proven. N3: export None-contract + gate-by-return verified.
+
+--------------------------------------------------------------------------------
+9.4 — STILL OPEN (nothing hidden)
+--------------------------------------------------------------------------------
+- Oversized files can still land on the FINAL M9 attempt (by design; noted).
+- FORGE-first cycles are effectively sequential (VRAM physics).
+- Non-Python fragments: fence/<think>/nontrivial checks only, no syntax
+  compilation (no toolchains assumed).
+- GUI parallel label remains an estimate, not a live executor readout.
+- PAUSE registers at loop top (up to one long LLM call late, worst ~400s
+  worst-case on a slow model load).
+- M8: closed-by-design (8.4 + Part 7 R6); do not scaffold it.
+Everything from 8.4 not restated here still applies.
+================================================================================
