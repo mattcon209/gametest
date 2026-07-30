@@ -3,7 +3,7 @@
 # Usage from PowerShell: .\ai-team.ps1 -Role forge -Prompt "Write player controller"
 
 param(
-    [Parameter(Mandatory=$true)][ValidateSet("aura","forge","spark","lore","pixel","glitch","director","programmer","gameplay","writer","artist","qa")][string]$Role,
+    [Parameter(Mandatory=$true)][ValidateSet("aura","forge","spark","lore","pixel","glitch","integrator","audio","director","programmer","gameplay","writer","artist","qa","builder","sfx")][string]$Role,
     [Parameter(Mandatory=$true)][string]$Prompt
 )
 
@@ -21,6 +21,11 @@ $TeamMap = @{
     "artist"     = @{ model="gemma3:12b";         name="PIXEL (Tech Artist)";        file="roles/pixel.txt" }
     "glitch"     = @{ model="deepseek-r1:14b";    name="GLITCH (QA)";                file="roles/glitch.txt" }
     "qa"         = @{ model="deepseek-r1:14b";    name="GLITCH (QA)";                file="roles/glitch.txt" }
+    # Audit11 R-B: these two roles were defined in TEAM/spec but missing here (L9)
+    "integrator" = @{ model="qwen3:14b";          name="INTEGRATOR (Final Builder)"; file="roles/integrator.txt" }
+    "builder"    = @{ model="qwen3:14b";          name="INTEGRATOR (Final Builder)"; file="roles/integrator.txt" }
+    "audio"      = @{ model="gemma3:4b";          name="AUDIO (Audio Designer)";     file="roles/audio.txt" }
+    "sfx"        = @{ model="gemma3:4b";          name="AUDIO (Audio Designer)";     file="roles/audio.txt" }
 }
 
 $selected = $TeamMap[$Role.ToLower()]
@@ -37,14 +42,20 @@ if (Test-Path $systemFile) {
 } else {
     # Fallback defaults if role files not found
     $defaults = @{
-        "aura" = "You are AURA, Game Director of a small indie studio. You design systems, keep scope small, and output clear tasks for other roles. Be practical, concise, and creative."
-        "forge" = "You are FORGE, Lead Engine Programmer. You write clean modular C# for Unity or GDScript for Godot. You use best practices, handle edge cases, and explain architecture."
-        "spark" = "You are SPARK, Gameplay Scripter. You write fast, fun, working prototype code in 50-120 lines. You optimize for playability."
-        "lore" = "You are LORE, Narrative Designer. You write consistent lore, branching dialogue in JSON, and atmospheric item descriptions."
-        "pixel" = "You are PIXEL, Technical Artist. You write shaders, suggest palettes, and analyze visual composition. You use Gemma vision capabilities."
-        "glitch" = "You are GLITCH, QA Lead. You think step-by-step, find bugs, exploits, and performance issues. Be thorough and brutal."
+        "aura" = "You are AURA Game Director. Respect the Engine field in the GDD completely - if it says no engine/from scratch/custom, you NEVER plan Unity/Unreal/Godot. You output strict JSON tasks. GDD is read-only, never modify it."
+        "forge" = "You are FORGE Lead Engine Programmer. Respect the Engine field above all else - if the GDD says custom engine/from scratch, build in the detected language with SDL/pygame/Raylib/OpenGL, NOT Unity C#/Unreal. GDD is read-only."
+        "spark" = "You are SPARK Gameplay Scripter. Respect the Engine field - for custom engine you write gameplay for that engine in the detected language, NOT Unity C#. 50-150 lines, fast prototype, fun. GDD is read-only."
+        "lore" = "You are LORE Narrative Designer. You write story, dialogue JSON, quests. ONLY narrative, not code. GDD is read-only, never modify it."
+        "pixel" = "You are PIXEL Technical Artist. Respect the Engine field - for custom engine write shaders for custom engine (GLSL, python), not Unity Shader Graph unless the GDD says Unity. GDD is read-only."
+        "glitch" = "You are GLITCH QA Lead. Respect the Engine field. Think step-by-step, check edge cases. Output bug report with fixed code. GDD is read-only, never modify it."
+        "integrator" = "You are INTEGRATOR final build engineer. Respect the Engine field completely. You merge fragments into one runnable game in /build/ in the detected language. If the GDD says custom/from scratch, build the entry point with custom loop, window, input. GDD is read-only."
+        "audio" = "You are AUDIO Audio Designer. Respect Engine and Language fields. You design SFX, music triggers, and audio system code stubs in the detected language. GDD is read-only."
     }
-    $systemPrompt = $defaults[$Role.ToLower().Split()[0]]
+    # Map aliases to their canonical role key for the fallback table
+    $aliasToRole = @{ "director"="aura"; "programmer"="forge"; "gameplay"="spark"; "writer"="lore"; "artist"="pixel"; "qa"="glitch"; "builder"="integrator"; "sfx"="audio" }
+    $roleKey = $Role.ToLower()
+    if ($aliasToRole.ContainsKey($roleKey)) { $roleKey = $aliasToRole[$roleKey] }
+    $systemPrompt = $defaults[$roleKey]
 }
 
 Write-Host "========================================" -ForegroundColor Cyan

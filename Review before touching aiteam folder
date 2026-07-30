@@ -949,3 +949,78 @@ V7  Heartbeat: 1 line + 1 model load across 70s of idling.
     Do not invent findings to justify the pass; record the verification, record
     what is still open, and stop.
 ================================================================================
+
+================================================================================
+PART 11 — AUDIT ROUND 11 + REPAIR (audited HEAD 1cb94e8 = Part 10)
+================================================================================
+Auditor: agent that authored Parts 0–5, 7, 9, back per the repeat request.
+Method: pulled, verified Part 10's heartbeat (C1) in code + execution, then
+hunted the two files that had skipped all ten previous audit rounds
+(README.md, tools/ai-team.ps1) plus the L-list stragglers. Four repairs,
+all proven in 11.3. Per advice 10.5/14: nothing invented beyond them.
+
+--------------------------------------------------------------------------------
+11.1 — PART 10 HARDENING: RE-VERIFIED, HOLDING
+--------------------------------------------------------------------------------
+- C1 idle-watch heartbeat confirmed in code (idle_ticks, every 20th 15s tick,
+  never a model load) and in live logs during this round's e2e runs.
+- Concur with 10.0: no defects found in my Part 9 changes. Second consecutive
+  clean round stands.
+
+--------------------------------------------------------------------------------
+11.2 — FINDINGS FIXED THIS ROUND
+--------------------------------------------------------------------------------
+R-A  [MED] README.md DRIFTED FROM THE MACHINE IT DESCRIBES (never audited in
+     10 rounds; L9/H1/H6 lineage):
+       · "5 LLMs (50GB)" -> 6 models (~53GB), matching the installer + TEAM
+         (AUDIO's gemma3:4b was invisible in the headline file).
+       · "safe combo: qwen3:8b+gemma3:12b" -> qwen3:8b exists in NO config
+         anywhere (Audit-1 H1 residue) - replaced with the three real combos
+         from the VRAM map, plus the FORGE-can't-pair physics note.
+       · Fix #1 claimed the spec facade pattern ({Part} components + facades)
+         as shipped - rewritten to describe what is real (unique random-suffix
+         naming + M9 split enforcement + sibling-task splits), with a pointer
+         to Parts 7/8 for why facades are closed-by-design.
+       · "AURA makes system asset lists" -> GUI builds them from the Features
+         text; studio injects them into AURA's prompt (the verified H2 fix).
+R-B  [LOW] tools/ai-team.ps1 STALE (L9, untouched across 10 audits): role set
+     predated integrator+audio, fallback prompts were Unity/Godot-centric and
+     contradicted the engine override. Added both roles (+builder/sfx aliases),
+     and replaced the fallback prompts with lane-aligned versions matching
+     roles/*.txt (engine respect, GDD read-only). Also fixed the alias->role
+     lookup in the fallback table (aliases previously missed the table key).
+     Statically reviewed - no pwsh in this sandbox; changes are additive.
+R-C  [LOW] L3 FINALLY CLOSED: gui.py start_team/run_build launched the spaced,
+     leading-"2." bat name unquoted with a list arg + shell=True and no cwd.
+     Now quoted absolute, cwd pinned, shell=True removed.
+R-D  [LOW] PAUSE was only honoured at loop top; a pause during a parallel
+     batch + its sequential validations (minutes, worst case) was invisible.
+     Added wait_if_paused() phase checks: after parallel batch (before
+     validation) and after integrator merge (before smoke test). Unit-proven:
+     waits until Resume, no model loads while waiting, returns cleanly.
+R-E  [HYGIENE] .gitignore: added state.json, inbox_history.txt,
+     output_prerestore_* (runtime files that would otherwise be commit-able).
+
+--------------------------------------------------------------------------------
+11.3 — VERIFICATION (execution)
+--------------------------------------------------------------------------------
+V1  py_compile / AST: studio.py, gui.py, smoke_check.py - all pass.
+V2  R-D unit: PAUSE created -> helper waits (10s tick observed) -> Resume
+    clears -> returns True; no-PAUSE call returns False instantly.
+V3  GDSCRIPT END-TO-END (shipped GDD, no LANGUAGE field): inference fired,
+    .gd fragments built, build/main.gd is real LLM output (marker), all
+    non-Python smoke guards engaged, DONE + SMOKE ALL PASS, 1 planner call.
+V4  PYTHON REGRESSION e2e: 6 tasks done attempts=1, real build/main.py,
+    SMOKE ALL PASS, hits tally 1 planner / 1 integrator / 6 worker /
+    6 validator (idle-watch holding).
+
+--------------------------------------------------------------------------------
+11.4 — STILL OPEN (nothing hidden)
+--------------------------------------------------------------------------------
+- Carried: M9 final-attempt oversize write (noted), FORGE-first sequential
+  (physics), non-Python syntax compilation absent (no toolchains), GUI
+  parallel label estimate, PAUSE within one long LLM call mid-phase (now
+  bounded by phase checkpoints instead of only the loop top).
+- M8 closed-by-design (Parts 7/8 concur). Do not scaffold it.
+- docs/archive/* remain intentionally stale history; README is now accurate.
+================================================================================

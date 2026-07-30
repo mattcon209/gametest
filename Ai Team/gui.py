@@ -510,7 +510,9 @@ CORE SYSTEMS FROM FEATURES:
 
     def start_team(self):
         try:
-            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", "2. Start Team.bat"], shell=True)
+            # FIX L3: bat name has spaces and a leading "2." - must be quoted,
+            # and the child needs cwd pinned or it searches elsewhere
+            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", '"2. Start Team.bat"'], cwd=str(BASE))
             messagebox.showinfo("Started", "Team started in new CMD window + GUI Live Log will update. Parallel execution enabled (max 2 models in 16GB VRAM).")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -635,7 +637,8 @@ CORE SYSTEMS FROM FEATURES:
         try:
             run_bat = BASE / "build" / "run.bat"
             if run_bat.exists():
-                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", str(run_bat)], shell=True)
+                # FIX L3: full path with spaces needs quoting; drop odd shell=True+list mix
+                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", f'"{run_bat}"'], cwd=str(run_bat.parent))
             else:
                 # Try any main
                 for ext in [".py",".cpp",".cs",".lua",".gd",".rs",".js"]:

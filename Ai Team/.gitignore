@@ -9,3 +9,6 @@ PAUSE
 gdd_history/
 output/
 build/
+state.json
+inbox_history.txt
+output_prerestore_*

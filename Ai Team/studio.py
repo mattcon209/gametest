@@ -438,6 +438,19 @@ def strip_thinking(text):
     return text.strip()
 
 
+def wait_if_paused(context=""):
+    """R-D: honor PAUSE between pipeline phases, not only at loop top.
+    Previously a pause requested during a parallel batch + its sequential
+    validations (worst case minutes) was invisible until the next loop top.
+    Waits cheaply (no model loads) until Resume. Returns True if it waited."""
+    if not PAUSE_FILE.exists():
+        return False
+    log(f"PAUSED at {context or 'phase boundary'} - waiting for Resume (GUI button deletes PAUSE)", "PAUSE")
+    while PAUSE_FILE.exists():
+        time.sleep(10)
+    log(f"Resumed after pause at {context or 'phase boundary'}", "PAUSE")
+    return True
+
 def file_too_big(text, ext):
     """M9 ENFORCEMENT: the 500-line / 25KB spec limits lived only inside prompt
     strings since v6 (SAFEGUARDS #16 unimplemented). This is the real gate.
@@ -868,6 +881,7 @@ Requirements:
                     
                     ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
 
+                    wait_if_paused("after integrator merge, before smoke test")  # R-D
                     # Test
                     log("Build created, running smoke test...", "TEST")
                     try:
@@ -1211,6 +1225,8 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                             tt["status"] = "failed"
                         break
             TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+
+            wait_if_paused("after parallel batch, before validation")  # R-D
 
             # Validate prepared results (sequentially, to avoid VRAM spike) and ONLY
             # THEN write fragments to output/ (validate-before-write). M9 size gate
