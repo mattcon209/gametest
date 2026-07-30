@@ -15,7 +15,7 @@ import os, time, json, urllib.request, urllib.error, re, shutil, random, subproc
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent  # FIX N2: resolve() hardens all paths, fixes smoke test build/build/main.py bug
 
 def get_gdd_path():
     # v6 supports both 4. and 5. naming due to GUI being 4.
@@ -309,16 +309,8 @@ def extract_code_from_response(result, primary="python"):
             if len(code_candidate) > 50:  # Minimal viable code length
                 return code_candidate
 
-    # If no fences, strip common prose prefixes like "Here's the save system:"
-    # Return original stripped of leading/trailing prose lines that are not code
-    # Keep result if it looks like code (contains def, class, import, :, {, }, etc.)
-    # Otherwise return original
-    stripped = original.strip()
-    # If original starts with prose and contains code block, we already extracted
-    # If still has markdown headers, remove lines starting with # for non-md files? Keep for .md roles
-    # For code roles, if result still contains "Here's" at start, try to find first code-like line
-    # Simple heuristic: find first line containing def, class, import, include, func, var, let, etc.
-    return stripped
+    # If no fences, return cleaned result (FIX C5: was returning original.strip() discarding <think> stripping)
+    return result.strip()
 
 def random_suffix():
     return f"{random.randint(0, 0xFFFF):04x}"
@@ -459,7 +451,7 @@ console.log("Fallback Build - Custom Engine JS - Engine: {engine_mode}");
 
     content = fallbacks.get(primary_ext, fallbacks[".py"])
     main_path.write_text(content, encoding="utf-8")
-    log(f"Fallback build created: {main_path} (language {primary_ext})", "BUILD")
+    log(f"Fallback build created: {main_path} (language {primary_ext}) - WARNING: LLM output was empty or too short (<=10 chars), so fallback placeholder used instead of LLM game", "BUILD")
 
     # Create run.bat / run.sh language-aware
     run_bat = BUILD_DIR / "run.bat"
@@ -659,7 +651,7 @@ Requirements:
                                 # Extract from original result at idx
                                 after = result[idx+len(pattern):]
                                 code = after.split("```")[0]
-                                if len(code.strip()) > 50:
+                                if len(code.strip()) > 10:  # FIX N1: Lowered from 50 to 10, 44-char games are valid
                                     main_path.write_text(code, encoding="utf-8")
                                     log(f"Build {main_path.name} extracted from LLM", "BUILD")
                         elif "```" in result:
@@ -671,7 +663,7 @@ Requirements:
                                 lines = code_candidate.splitlines()
                                 if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","lua","gdscript","rust","javascript","js"]:
                                     code_candidate = "\n".join(lines[1:])
-                                if len(code_candidate.strip()) > 100:
+                                if len(code_candidate.strip()) > 10:  # FIX N1: Lowered from 100 to 10
                                     main_path.write_text(code_candidate, encoding="utf-8")
                                     log(f"Build {main_path.name} extracted (fallback)", "BUILD")
                                     break
@@ -885,35 +877,39 @@ JSON only.
         else:
             parallel_batch = [pending[0]]
 
-        # FIX H3: Max tasks cap - if done >=25, output [] and finish
+        # FIX C-cap / H3: Max tasks cap - properly scoped, does not delete pending work, does not write false DONE without build
+        # Parse scope from MEMORY or GDD (not from unbound local gdd_text)
         MAX_TASKS = 25
-        # Scope from GDD
         try:
-            scope_text = gdd_text.lower() if 'gdd_text' in locals() else ""
-            if "large (50" in scope_text or "50 tasks" in scope_text:
+            # Try to get scope from MEMORY.md or tasks or GDD file
+            mem_text = read_file(MEMORY_FILE).lower() + " " + read_file(GDD_FILE).lower()
+            if "large (50" in mem_text or "50 tasks" in mem_text:
                 MAX_TASKS = 50
-            elif "small (10" in scope_text:
+            elif "small (10" in mem_text:
                 MAX_TASKS = 10
-        except:
+        except Exception:
             pass
         done_count = len([t for t in tasks if t.get("status")=="done"])
-        if done_count >= MAX_TASKS:
-            log(f"Max tasks cap reached ({done_count} >= {MAX_TASKS}) - output [] true finish", "CAP")
-            # Export and DONE handled in planning loop, here just idle
-            tasks = [t for t in tasks if t.get("status")=="done"]
-            TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
-            # Ensure DONE written
-            if not (BUILD_DIR / "DONE").exists():
-                (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {__import__('datetime').datetime.now()}\n", encoding="utf-8")
-            import time as _time
-            _time.sleep(15)
+        pending_count = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
+        if done_count >= MAX_TASKS and pending_count == 0:
+            log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
+            # Do NOT delete pending (there are none), do NOT write false DONE without checking build exists first
+            # Export current build before going IDLE
+            if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
+                export_build(f"CAP_{MAX_TASKS}")
+                if not (BUILD_DIR / "DONE").exists():
+                    (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
+            else:
+                log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
+            time.sleep(15)
             continue
 
         # If parallel batch, process them
         # For simplicity, we will still process sequentially in this version but log as parallel batch
         # Full parallel via ThreadPoolExecutor will be implemented in next iteration
         # For now, take first of batch to maintain compatibility
-        task = parallel_batch[0]
+# parallel batch already handled above
+        task = pending[0]  # fallback to sequential if parallel not triggered
         # Store batch for future parallel implementation
         current_parallel_batch = parallel_batch
 
