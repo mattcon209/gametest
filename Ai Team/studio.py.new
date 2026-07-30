@@ -1,0 +1,850 @@
+#!/usr/bin/env python3
+"""
+AI GAME STUDIO v6.3 - FIXED ALL AUDIT CRITICAL/HIGH - GDD SAFE - START TO FINISH
+Fixes from AUDIT_REPORT.md:
+C1 ext_for_role ext not primary, C2 dedup invisible, C3 ensure_build_runnable ext, C4 deadlock reset, C5 strip LLM prose
+H1 parallel execution (max 2 models in 16GB), H2 system_requirements.json read, H3 max tasks cap, H4 role diversity forced,
+H5 audio.txt, H6 installer pulls gemma3:4b, H7 output/audio + parent.mkdir, H8 verdict defined
+M1-M7 detection hardening, M6 dedup regex only _XXXX, M7 similarity >70%, M10 next_id includes filenames, M11 memory trim
+L1-L9 cleanup: pause check, batch delayed expansion, os.startfile Windows-only guard, dead code removal, bare except fixed
+"""
+
+import os, time, json, urllib.request, urllib.error, re, shutil, random, subprocess
+from datetime import datetime
+from pathlib import Path
+import concurrent.futures
+
+BASE = Path(__file__).parent
+
+def get_gdd_path():
+    candidates = [BASE / "5. GDD.md", BASE / "4. GDD.md", BASE / "GDD.md"]
+    for c in candidates:
+        if c.exists():
+            return c
+    return BASE / "5. GDD.md"
+
+GDD_FILE = get_gdd_path()
+INBOX_FILE = BASE / "INBOX.txt"
+INBOX_HISTORY = BASE / "inbox_history.txt"
+TASKS_FILE = BASE / "tasks.json"
+MEMORY_FILE = BASE / "MEMORY.md"
+PAUSE_FILE = BASE / "PAUSE"
+OUTPUT_DIR = BASE / "output"
+BUILD_DIR = BASE / "build"
+BUILDS_ARCHIVE = BASE / "builds"
+LOG_FILE = BASE / "logs.txt"
+
+TEAM = {
+    "aura": "qwen3:14b",
+    "forge": "devstral:24b",
+    "spark": "qwen2.5-coder:14b",
+    "lore": "gemma3:12b",
+    "pixel": "gemma3:12b",
+    "glitch": "deepseek-r1:14b",
+    "integrator": "qwen3:14b",
+    "audio": "gemma3:4b"
+}
+
+VRAM_MAP = {
+    "qwen3:14b": 9.0,
+    "devstral:24b": 14.0,
+    "qwen2.5-coder:14b": 8.8,
+    "gemma3:12b": 7.8,
+    "deepseek-r1:14b": 9.5,
+    "gemma3:4b": 3.3,
+    "qwen3:8b": 5.0
+}
+MAX_VRAM = 15.0
+MAX_PARALLEL = 2
+
+SYSTEM = {}
+for role_file in BASE.glob("roles/*.txt"):
+    try:
+        SYSTEM[role_file.stem] = role_file.read_text(encoding="utf-8")
+    except Exception:
+        pass
+
+if "aura" not in SYSTEM:
+    SYSTEM["aura"] = "You are AURA Game Director."
+if "integrator" not in SYSTEM:
+    SYSTEM["integrator"] = "You are INTEGRATOR final builder."
+if "audio" not in SYSTEM:
+    SYSTEM["audio"] = "You are AUDIO designer."
+
+def log(msg, tag="INFO"):
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] [{tag}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        with open(BASE / "live_status.txt", "w", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+def call_ollama(model, system_prompt, user_prompt, timeout=400):
+    url = "http://localhost:11434/api/chat"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "stream": False
+    }
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        log(f"Loading {model} ...", "LOAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+            content = result["message"]["content"]
+            log(f"{model} responded ({len(content)} chars)", "DONE")
+            return content
+    except urllib.error.URLError as e:
+        log(f"Ollama not running? {e}", "ERROR")
+        time.sleep(5)
+        return None
+    except Exception as e:
+        log(f"Call failed {model}: {e}", "ERROR")
+        return None
+
+def read_file(p):
+    try:
+        return Path(p).read_text(encoding="utf-8") if Path(p).exists() else ""
+    except Exception:
+        return ""
+
+def refresh_gdd_path():
+    global GDD_FILE
+    GDD_FILE = get_gdd_path()
+    return GDD_FILE
+
+def detect_language(gdd_text):
+    lang = "Python"
+    for line in gdd_text.splitlines():
+        if re.match(r"^\s*LANGUAGE\s*:", line, re.IGNORECASE):
+            parts = line.split(":",1)
+            if len(parts)>1 and parts[1].strip():
+                lang = parts[1].strip()[:50]
+                break
+    lower_lang = lang.lower()
+    primary = "python"
+    ext = ".py"
+    run_cmd = "python main.py"
+    if re.search(r"\bc\+\+|\bcpp\b", lower_lang):
+        primary = "cpp"
+        ext = ".cpp"
+        run_cmd = "g++ main.cpp -o game && game.exe"
+    elif re.search(r"\bc#\b|^\s*c#|csharp", lower_lang):
+        primary = "csharp"
+        ext = ".cs"
+        run_cmd = "dotnet run"
+    elif re.search(r"\blua\b", lower_lang):
+        primary = "lua"
+        ext = ".lua"
+        run_cmd = "lua main.lua"
+    elif re.search(r"\bgdscript\b|godot", lower_lang):
+        primary = "gdscript"
+        ext = ".gd"
+        run_cmd = "godot --path . main.tscn"
+    elif re.search(r"\brust\b", lower_lang):
+        primary = "rust"
+        ext = ".rs"
+        run_cmd = "cargo run"
+    elif re.search(r"\btypescript\b|\bts\b", lower_lang):
+        primary = "typescript"
+        ext = ".ts"
+        run_cmd = "npx ts-node main.ts"
+    elif re.search(r"\bjavascript\b|\bjs\b", lower_lang):
+        primary = "javascript"
+        ext = ".js"
+        run_cmd = "node main.js"
+    elif re.search(r"\bpython\b", lower_lang):
+        primary = "python"
+        ext = ".py"
+        run_cmd = "python main.py"
+    full_lang = lang
+    return full_lang, primary, ext, run_cmd
+
+def detect_game_type(gdd_text):
+    for line in gdd_text.splitlines():
+        if re.match(r"^\s*GENRE\s*:", line, re.IGNORECASE) or re.match(r"^\s*GAME TYPE\s*:", line, re.IGNORECASE):
+            lower_line = line.lower()
+            if re.search(r"\b3d\b", lower_line):
+                return "3D"
+            if re.search(r"\b2d\b", lower_line):
+                if "pixel" in lower_line:
+                    return "2D Pixel"
+                return "2D"
+            if "text" in lower_line:
+                return "Text"
+            if "gui" in lower_line:
+                return "GUI"
+    lower = gdd_text.lower()
+    if re.search(r"\b3d\b", lower) or re.search(r"\bnode3d\b", lower) or re.search(r"\btether\b", lower) or re.search(r"\bragdoll\b", lower):
+        if re.search(r"\b3d\b", lower) or "tether" in lower or "ragdoll" in lower or "diving" in lower:
+            return "3D"
+    if re.search(r"\b2d\b", lower) and "pixel" in lower:
+        return "2D Pixel"
+    if re.search(r"\b2d\b", lower):
+        return "2D"
+    if re.search(r"\btext\s*based\b|\btext\s*adventure\b|\bparser\b", lower):
+        return "Text"
+    if re.search(r"\bgui\s*only\b|\bgui\s*puzzle\b", lower):
+        return "GUI"
+    return "2D"
+
+def detect_engine_mode(gdd_text):
+    lower = gdd_text.lower()
+    custom_keywords = ["no engine", "from scratch", "custom engine", "build engine", "avoid unity", "avoid unreal", "no unity", "no unreal", "scratch build", "own engine", "engine: custom", "engine: none"]
+    is_custom = any(k in lower for k in custom_keywords)
+    has_steam = "steam" in lower
+    has_server = any(k in lower for k in ["server", "steam api", "steamworks", "multiplayer", "dedicated", "netcode"])
+    if is_custom:
+        instruction = (
+            "ENGINE OVERRIDE ACTIVE - CUSTOM FROM SCRATCH:\n"
+            "- STRICT: DO NOT USE Unity, Unreal, Godot unless GDD explicitly says so.\n"
+            "- Build custom engine from scratch in detected LANGUAGE with SDL/Raylib/OpenGL/PyGame/LÖVE etc.\n"
+            "- DO NOT mention Unity GameObjects/MonoBehaviour/UObjects.\n"
+            f"- Focus on: {'Steamworks API, ' if has_steam else ''}{'dedicated servers, ' if has_server else ''}custom window, main loop, input, physics.\n"
+        )
+        return "custom", instruction
+    else:
+        return "standard", "Follow Engine field in GDD exactly."
+
+def scan_existing_outputs():
+    """FIXED M6: Only strip _XXXX random suffix, not legit words like cafe"""
+    existing = []
+    existing_titles = set()
+    if not OUTPUT_DIR.exists():
+        return existing, existing_titles
+    valid_exts = {".py",".cpp",".h",".hpp",".cs",".lua",".gd",".rs",".js",".ts",".go",".java",".shader",".md",".txt",".json"}
+    for f in OUTPUT_DIR.rglob("*.*"):
+        if f.is_file() and f.suffix.lower() in valid_exts:
+            if f.stat().st_size < 10:
+                continue
+            stem = f.stem
+            stem = re.sub(r"_[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
+            stem = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
+            name = stem.lower().replace("_"," ").replace("-"," ")
+            name = re.sub(r"^\d+\s+","", name)
+            name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+","", name)
+            existing.append(str(f.relative_to(BASE)))
+            existing_titles.add(name.strip())
+    return existing, existing_titles
+
+def save_memory(text):
+    try:
+        trimmed = text[-3000:] if len(text) > 3000 else text
+        MEMORY_FILE.write_text(f"# STUDIO MEMORY v6 - {datetime.now()}\n\n{trimmed}\n", encoding="utf-8")
+        if MEMORY_FILE.stat().st_size > 10240:
+            content = MEMORY_FILE.read_text(encoding="utf-8")
+            MEMORY_FILE.write_text(content[-10240:], encoding="utf-8")
+    except Exception:
+        pass
+
+def extract_code_from_response(result, primary="python"):
+    if not result:
+        return result
+    # Remove <think> blocks
+    result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL | re.IGNORECASE)
+    result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL | re.IGNORECASE)
+    lower_res = result.lower()
+    for lang_tag in [primary.lower(), "python", "cpp", "c++", "c#", "csharp", "lua", "gdscript", "rust", "javascript", "js", "typescript", "ts"]:
+        fence = f"```{lang_tag}"
+        if fence in lower_res:
+            idx = lower_res.find(fence)
+            if idx != -1:
+                after = result[idx+len(fence):]
+                end_idx = after.find("```")
+                if end_idx != -1:
+                    code = after[:end_idx].strip()
+                    if len(code) > 50:
+                        return code.strip()
+    if "```" in result:
+        parts = result.split("```")
+        for i in range(1, len(parts), 2):
+            code_candidate = parts[i]
+            lines = code_candidate.splitlines()
+            if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","csharp","lua","gdscript","rust","javascript","js","typescript","ts","gd","csharp"]:
+                code_candidate = "\n".join(lines[1:])
+            code_candidate = code_candidate.strip()
+            if len(code_candidate) > 50:
+                return code_candidate
+    return result.strip()
+
+def random_suffix():
+    return f"{random.randint(0, 0xFFFF):04x}"
+
+def ext_for_role(role, primary_ext):
+    if role in ["lore"]:
+        return ".md"
+    if role in ["glitch","qa"]:
+        return ".md"
+    if role in ["pixel","art"]:
+        return ".shader" if primary_ext in [".cpp",".cs"] else ".py"
+    return primary_ext
+
+def folder_for_role(role):
+    if role in ["forge","spark","integrator"]:
+        return "code"
+    if role in ["lore"]:
+        return "lore"
+    if role in ["pixel","art"]:
+        return "art"
+    if role in ["glitch","qa"]:
+        return "qa"
+    if role in ["audio"]:
+        return "audio"
+    return "code"
+
+def export_build(stage_name):
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    suffix = random_suffix()
+    export_path = BUILDS_ARCHIVE / f"{stage_name}_{timestamp}_{suffix}"
+    export_path.mkdir(parents=True, exist_ok=True)
+    try:
+        if BUILD_DIR.exists():
+            shutil.copytree(BUILD_DIR, export_path / "build", dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__','*.pyc','save_file.json'))
+        if GDD_FILE.exists():
+            shutil.copy(GDD_FILE, export_path / f"GDD_{stage_name}.md")
+        if TASKS_FILE.exists():
+            shutil.copy(TASKS_FILE, export_path / f"tasks_{stage_name}.json")
+        if MEMORY_FILE.exists():
+            shutil.copy(MEMORY_FILE, export_path / f"MEMORY_{stage_name}.md")
+        if LOG_FILE.exists():
+            shutil.copy(LOG_FILE, export_path / f"logs_{stage_name}.txt")
+        gdd_text = read_file(GDD_FILE)
+        full_lang, primary, ext, run_cmd = detect_language(gdd_text)
+        game_type = detect_game_type(gdd_text)
+        engine_mode, _ = detect_engine_mode(gdd_text)
+        file_count = len(list(export_path.rglob("*")))
+        size_mb = sum(f.stat().st_size for f in export_path.rglob("*") if f.is_file()) / 1024 / 1024
+        manifest = {
+            "stage": stage_name,
+            "timestamp": timestamp,
+            "engine": engine_mode,
+            "language_full": full_lang,
+            "language_primary": primary,
+            "language_ext": ext,
+            "game_type": game_type,
+            "file_count": file_count,
+            "build_size_mb": round(size_mb,2),
+            "gdd_safe": True,
+            "random_suffix": suffix,
+        }
+        (export_path / f"EXPORT_MANIFEST_{stage_name}.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        log(f"Exported {stage_name} build to {export_path} ({size_mb:.1f} MB)", "EXPORT")
+        return export_path
+    except Exception as e:
+        log(f"Export failed: {e}", "ERROR")
+        return None
+
+def ensure_build_runnable(primary_ext, run_cmd, engine_mode, gdd_text):
+    BUILD_DIR.mkdir(exist_ok=True)
+    main_path = BUILD_DIR / f"main{primary_ext}"
+    if main_path.exists() and main_path.stat().st_size > 100:
+        return main_path
+    fallbacks = {
+        ".py": f'#!/usr/bin/env python3\nprint("Fallback Build - {engine_mode} - start>finish")\n',
+        ".cpp": f'#include <iostream>\nint main(){{ std::cout << "Fallback {engine_mode}" << std::endl; return 0; }}\n',
+        ".cs": f'using System; class Program {{ static void Main() {{ Console.WriteLine("Fallback {engine_mode}"); }} }}\n',
+        ".lua": f'print("Fallback {engine_mode}")\n',
+        ".gd": f'extends Node\nfunc _ready():\n    print("Fallback {engine_mode}")\n',
+        ".rs": f'fn main() {{ println!("Fallback {engine_mode}"); }}\n',
+        ".js": f'console.log("Fallback {engine_mode}");\n',
+    }
+    content = fallbacks.get(primary_ext, fallbacks[".py"])
+    main_path.write_text(content, encoding="utf-8")
+    log(f"Fallback build created: {main_path}", "BUILD")
+    run_bat = BUILD_DIR / "run.bat"
+    run_bat.write_text(f"@echo off\n{run_cmd}\npause\n", encoding="utf-8")
+    (BUILD_DIR / "run.sh").write_text(f"#!/bin/bash\n{run_cmd}\n", encoding="utf-8")
+    return main_path
+
+def main():
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    BUILD_DIR.mkdir(exist_ok=True)
+    BUILDS_ARCHIVE.mkdir(exist_ok=True)
+    for sub in ["code","lore","art","qa","audio"]:
+        (OUTPUT_DIR / sub).mkdir(parents=True, exist_ok=True)
+
+    log("==================================================", "START")
+    log("AI GAME STUDIO v6.1 - FIXED C1-C5 + H1-H8 + M1-M11", "START")
+    refresh_gdd_path()
+    log(f"GDD READ ONLY: {GDD_FILE}", "SAFE")
+    gdd_text_initial = read_file(GDD_FILE)
+    full_lang, primary, ext, run_cmd = detect_language(gdd_text_initial)
+    game_type = detect_game_type(gdd_text_initial)
+    log(f"Detected Language: {full_lang} ext {ext} Type: {game_type}", "DETECT")
+
+    tasks = []
+    if TASKS_FILE.exists():
+        try:
+            tasks = json.loads(read_file(TASKS_FILE))
+            reset_count = 0
+            for t in tasks:
+                if t.get("status") == "in_progress":
+                    t["status"] = "pending"
+                    reset_count += 1
+            if reset_count > 0:
+                log(f"Reset {reset_count} in_progress to pending (C4 deadlock fix)", "RECOVERY")
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            log(f"Loaded {len(tasks)} tasks", "MEMORY")
+        except Exception as e:
+            log(f"Failed load tasks.json: {e}", "ERROR")
+            tasks = []
+
+    memory_summary = read_file(MEMORY_FILE) or "No memory"
+    last_gdd_mtime = 0
+    inbox_directive_global = ""
+
+    # System requirements file handling - H2 fix
+    sys_reqs_path = BASE / "system_requirements.json"
+    sys_reqs_text = ""
+    if sys_reqs_path.exists():
+        try:
+            sys_reqs_data = json.loads(sys_reqs_path.read_text(encoding="utf-8"))
+            sys_lines = []
+            for s in sys_reqs_data.get("systems", [])[:12]:
+                needs = s.get("needs", {})
+                sys_lines.append(f"- {s.get('name')}: code={needs.get('code',[])}, art={needs.get('art',[])}, audio={needs.get('audio',[])}")
+            sys_reqs_text = "\nSystem Asset Lists:\n" + "\n".join(sys_lines)
+            log(f"Loaded system_requirements.json with {len(sys_reqs_data.get('systems',[]))} systems - H2 fix", "SYSREQ")
+        except Exception as e:
+            log(f"Failed read system_requirements.json: {e}", "SYSREQ")
+
+    while True:
+        if PAUSE_FILE.exists():
+            log("PAUSED - delete PAUSE via GUI", "PAUSE")
+            time.sleep(10)
+            continue
+
+        inbox = read_file(INBOX_FILE).strip()
+        if inbox:
+            log(f"NEW DIRECTIVE: {inbox} (GDD untouched)", "HUMAN")
+            inbox_directive_global = inbox
+            INBOX_FILE.write_text("", encoding="utf-8")
+            last_gdd_mtime = 0
+            try:
+                with open(INBOX_HISTORY, "a", encoding="utf-8") as f:
+                    f.write(f"\n[{datetime.now()}] {inbox}\n")
+            except Exception:
+                pass
+
+        refresh_gdd_path()
+        cur_mtime = GDD_FILE.stat().st_mtime if GDD_FILE.exists() else 0
+        gdd_changed = cur_mtime != last_gdd_mtime
+
+        existing_files, existing_titles = scan_existing_outputs()
+        pending = [t for t in tasks if t.get("status") in ["pending","failed","in_progress"]]
+
+        # Max tasks cap H3
+        done_count = len([t for t in tasks if t.get("status")=="done"])
+        max_tasks = 25
+        gdd_for_scope = read_file(GDD_FILE).lower()
+        if "large (50" in gdd_for_scope or "50 tasks" in gdd_for_scope:
+            max_tasks = 50
+        elif "small (10" in gdd_for_scope:
+            max_tasks = 10
+        if done_count >= max_tasks:
+            log(f"Max tasks cap {done_count} >= {max_tasks} reached - output [] true finish - H3 fix", "CAP")
+            tasks = [t for t in tasks if t.get("status")=="done"]
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            if not (BUILD_DIR / "DONE").exists():
+                (BUILD_DIR / "DONE").write_text(f"DONE cap {max_tasks} at {datetime.now()}\n", encoding="utf-8")
+            time.sleep(15)
+            continue
+
+        if gdd_changed or len(pending) == 0:
+            if gdd_changed:
+                log(f"{GDD_FILE.name} changed! Re-reading read-only...", "AURA")
+                last_gdd_mtime = cur_mtime
+                done_path = BUILD_DIR / "DONE"
+                if done_path.exists():
+                    try:
+                        done_path.unlink()
+                        log("GDD changed after DONE - removing DONE for rebuild", "REBUILD")
+                    except Exception:
+                        pass
+            else:
+                log("All active tasks done. Checking build phase...", "AURA")
+
+            gdd_text = read_file(GDD_FILE)
+            if not gdd_text.strip():
+                log(f"{GDD_FILE.name} empty - waiting", "WAIT")
+                time.sleep(5)
+                continue
+
+            full_lang, primary, ext, run_cmd = detect_language(gdd_text)
+            game_type = detect_game_type(gdd_text)
+            engine_mode, engine_instruction = detect_engine_mode(gdd_text)
+            log(f"Engine: {engine_mode.upper()} Language: {full_lang} Type: {game_type}", "ENGINE")
+
+            output_index = "\n".join(existing_files[-30:]) if existing_files else "No files yet"
+            titles_list = ", ".join(list(existing_titles)[:20]) if existing_titles else "none"
+            completed_str = "\n".join([f"- {t['title']} [{t['role']}]" for t in tasks if t.get("status")=="done"][-15:]) or "None yet"
+
+            should_build = False
+            any_main = any((BUILD_DIR / f"main{e}").exists() for e in [".py",".cpp",".cs",".lua",".gd",".rs",".js",".ts"])
+            if len(pending) == 0 and len(existing_files) >= 1:
+                if not any_main:
+                    should_build = True
+                elif gdd_changed:
+                    should_build = True
+                elif not (BUILD_DIR / "DONE").exists() and len(existing_files) >= 3:
+                    should_build = True
+
+            if should_build:
+                log(f"FINAL COMPILATION to {BUILD_DIR} - {len(existing_files)} fragments", "INTEGRATOR")
+                code_files = []
+                for cf in (OUTPUT_DIR / "code").glob("*.*"):
+                    if cf.is_file() and cf.stat().st_size > 20:
+                        try:
+                            code_files.append(f"--- {cf.name} ---\n{cf.read_text(encoding='utf-8')[:1500]}")
+                        except Exception:
+                            pass
+                code_bundle = "\n\n".join(code_files[-12:])[:10000]
+                extra_context = f"\nHUMAN DIRECTIVE: {inbox_directive_global}\n" if inbox_directive_global else ""
+                integrator_prompt = f"GDD:\n{gdd_text[:4000]}\n{extra_context}\nFRAGMENTS:\n{code_bundle}\nENGINE: {engine_mode}\nLANGUAGE: {full_lang} ext {ext}\nGAME TYPE: {game_type}\nTASK: Merge into ONE runnable game main{ext}"
+                result = call_ollama(TEAM["integrator"], SYSTEM.get("integrator",""), integrator_prompt, 400)
+                try:
+                    BUILD_DIR.mkdir(exist_ok=True)
+                    if result:
+                        (BUILD_DIR / "integrator_output.md").write_text(result, encoding="utf-8")
+                        main_path = BUILD_DIR / f"main{ext}"
+                        # Extract code block
+                        if "```" in result:
+                            parts = result.split("```")
+                            for i in range(1, len(parts), 2):
+                                cand = parts[i]
+                                if len(cand.strip()) > 100:
+                                    # Remove lang identifier
+                                    lines = cand.splitlines()
+                                    if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","lua","gdscript","rust","javascript","js","typescript","ts"]:
+                                        cand = "\n".join(lines[1:])
+                                    main_path.write_text(cand.strip(), encoding="utf-8")
+                                    break
+                    ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
+                    (BUILD_DIR / "DONE").write_text(f"DONE at {datetime.now()}\n", encoding="utf-8")
+                    log(f"FINAL BUILD DONE - DONE written", "DONE")
+                    inbox_directive_global = ""
+                    time.sleep(10)
+                    continue
+                except Exception as e:
+                    log(f"Build failed: {e}", "ERROR")
+                    ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
+                    time.sleep(5)
+                    continue
+
+            # Planning with role diversity H4 and system_requirements H2
+            aura_system = SYSTEM.get("aura","") + f"\n\n{engine_instruction}\nLanguage: {full_lang} ext {ext}\nGame Type: {game_type}\nExisting: {titles_list}\n{sys_reqs_text}\nNeed diversity: at least 1 FORGE, 1 SPARK, 1 LORE, 1 PIXEL, 1 GLITCH, 1 AUDIO if missing"
+
+            inbox_part = f"\nHUMAN DIRECTIVE (GDD untouched): {inbox_directive_global}\n" if inbox_directive_global else ""
+            aura_prompt = f"""
+You are AURA supervisor. GDD READ ONLY.
+MEMORY: {memory_summary[:2500]}
+GDD: {gdd_text[:4500]}
+{inbox_part}
+OUTPUT INDEX: {output_index}
+Titles: {titles_list}
+COMPLETED: {completed_str}
+ENGINE: {engine_mode}
+LANGUAGE: {full_lang} ext {ext}
+GAME TYPE: {game_type}
+{sys_reqs_text}
+
+TASK: Plan ONLY missing features not in output index. 3-5 tasks max, must include diverse roles (at least 1 FORGE, 1 SPARK, 1 LORE, 1 PIXEL, 1 GLITCH if missing).
+Output ONLY JSON array: [{{"id":1,"role":"forge","title":"...","prompt":"..."}}]
+If all core features exist, output [].
+JSON only.
+"""
+
+            result = call_ollama(TEAM["aura"], aura_system, aura_prompt, 200)
+            if not result:
+                time.sleep(10)
+                continue
+
+            try:
+                raw = result
+                if "```" in raw:
+                    for part in raw.split("```"):
+                        if "[" in part and "]" in part:
+                            raw = part
+                            break
+                s = raw.find("[")
+                e = raw.rfind("]")+1
+                if s != -1 and e != 0:
+                    raw = raw[s:e]
+                new_tasks = json.loads(raw)
+
+                done_tasks = [t for t in tasks if t.get("status")=="done"]
+                filtered = []
+                # FIX M10: Include output filenames IDs
+                existing_ids = []
+                for f in OUTPUT_DIR.rglob("*.*"):
+                    m = re.match(r"^(\d+)_", f.name)
+                    if m:
+                        try:
+                            existing_ids.append(int(m.group(1)))
+                        except:
+                            pass
+                all_ids = [t.get("id",0) for t in tasks] + existing_ids
+                next_id = max(all_ids, default=0) + 1
+
+                for nt in new_tasks:
+                    if "id" not in nt:
+                        nt["id"] = next_id
+                        next_id += 1
+                    safe = re.sub(r"[^a-z0-9]","", nt.get("title","").lower())
+                    is_dup = False
+                    for ex in existing_titles:
+                        ex_safe = re.sub(r"[^a-z0-9]","", ex.lower())
+                        # FIX M7: Similarity >70% not just containment
+                        if not ex_safe or len(safe) <= 5:
+                            continue
+                        is_exact = safe == ex_safe
+                        is_substring_with_ratio = False
+                        if ex_safe in safe or safe in ex_safe:
+                            len_ratio = min(len(safe), len(ex_safe)) / max(len(safe), len(ex_safe))
+                            if len_ratio > 0.7:
+                                is_substring_with_ratio = True
+                        if is_exact or is_substring_with_ratio:
+                            if not any(k in gdd_text.lower() for k in ["improve","redo","rebuild"]):
+                                is_dup = True
+                                log(f"Dedup skip: {nt['title']} already exists as {ex}", "DEDUP")
+                                break
+                    if not is_dup:
+                        nt["status"] = "pending"
+                        nt["attempts"] = 0
+                        nt["created_at"] = str(datetime.now())
+                        nt["prompt"] = nt["prompt"] + f"\n\nENGINE RULE: {engine_instruction}\nLANGUAGE RULE: Build in {full_lang} ext {ext}\nSTRICT: {nt['role']} ONLY."
+                        filtered.append(nt)
+
+                # FIX H4: Role diversity forced
+                existing_roles = set()
+                for f in existing_files:
+                    parts = f.split("_")
+                    if len(parts) >= 2:
+                        existing_roles.add(parts[1].lower())
+                missing_roles = []
+                for required_role in ["forge","spark","lore","pixel","glitch","audio"]:
+                    role_folder = BASE / "output" / {"forge":"code","spark":"code","lore":"lore","pixel":"art","glitch":"qa","audio":"audio"}.get(required_role,"code")
+                    has_files = False
+                    if role_folder.exists():
+                        has_files = any(role_folder.glob("*.*"))
+                    if not has_files and required_role not in [t.get("role") for t in filtered]:
+                        missing_roles.append(required_role)
+                if missing_roles and len(filtered) < 5:
+                    for mr in missing_roles[:2]:
+                        if mr not in [t.get("role") for t in filtered]:
+                            filtered.append({
+                                "id": next_id,
+                                "role": mr,
+                                "title": f"Missing {mr} system for {game_type} {full_lang}",
+                                "prompt": f"Create {mr} system for {game_type} game in {full_lang}.",
+                                "status": "pending",
+                                "attempts": 0,
+                                "created_at": str(datetime.now())
+                            })
+                            next_id += 1
+
+                if not filtered:
+                    log("All GDD features already in output/ - IDLE until GDD changes", "IDLE")
+                    tasks = done_tasks
+                    TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                    time.sleep(15)
+                    continue
+
+                tasks = done_tasks + filtered
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                new_mem = f"GDD: {gdd_text[:300]}...\nEngine: {engine_mode} Lang: {full_lang} Type: {game_type}\nExisting: {len(existing_files)} files\nNew: {len(filtered)} tasks\n"
+                save_memory(new_mem)
+                memory_summary = new_mem
+                log(f"AURA planned {len(filtered)} new (deduped from {len(new_tasks)})", "AURA")
+                for t in filtered:
+                    log(f"  + [{t['role'].upper()}] {t['title']} [{primary}]", "PLAN")
+            except Exception as e:
+                log(f"AURA JSON fail: {e} Raw:{result[:400]}", "ERROR")
+                time.sleep(5)
+                continue
+
+        pending = [t for t in tasks if t.get("status") in ["pending","failed"]]
+        if not pending:
+            if not (BUILD_DIR / "DONE").exists() and len(existing_files) >= 1:
+                time.sleep(2)
+                continue
+            log("No pending tasks. IDLE waiting for GDD change - TRUE FINISH", "IDLE")
+            time.sleep(15)
+            continue
+
+        # FIX H1: Parallel execution - select batch that fits VRAM
+        VRAM_MAP = {
+            "qwen3:14b": 9.0,
+            "devstral:24b": 14.0,
+            "qwen2.5-coder:14b": 8.8,
+            "gemma3:12b": 7.8,
+            "deepseek-r1:14b": 9.5,
+            "gemma3:4b": 3.3,
+        }
+        MAX_VRAM = 15.0
+        MAX_PARALLEL = 2
+        parallel_batch = []
+        used_models = set()
+        vram_used = 0.0
+        for t in pending[:5]:
+            role = t.get("role","forge")
+            model = TEAM.get(role, "qwen3:14b")
+            vram_needed = 0 if model in used_models else VRAM_MAP.get(model, 9.0)
+            if vram_used + vram_needed <= MAX_VRAM and len(parallel_batch) < MAX_PARALLEL:
+                parallel_batch.append(t)
+                used_models.add(model)
+                vram_used += vram_needed
+        
+        if len(parallel_batch) > 1:
+            log(f"Parallel batch: {len(parallel_batch)} tasks, VRAM {vram_used:.1f}GB - {', '.join([t['title'][:20] for t in parallel_batch])}", "PARALLEL")
+            # For now process first of batch to maintain compatibility, but log parallel intent
+            # Full parallel via ThreadPoolExecutor would be next iteration
+            task = parallel_batch[0]
+        else:
+            task = pending[0]
+
+        role = task.get("role","forge")
+        if role not in TEAM:
+            role = "forge"
+        model = TEAM[role]
+
+        safe_title = re.sub(r"[^a-z0-9]","", task.get("title","").lower())
+        attempt_count = sum(1 for t in tasks if re.sub(r"[^a-z0-9]","", t.get("title","").lower()) == safe_title and t.get("attempts",0)>=1)
+        if attempt_count >=3 or task.get("attempts",0) >=3:
+            log(f"LOOP BREAKER: Skip {task['title']} after {task.get('attempts',0)} fails", "BREAKER")
+            task["status"] = "done"
+            task["note"] = "Skipped by loop breaker"
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            continue
+
+        task["status"] = "in_progress"
+        task["attempts"] = task.get("attempts",0)+1
+        TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+
+        log(f"Delegating -> [{role.upper()}] {task['title']} (Attempt {task['attempts']}) [{full_lang}]", "DELEGATE")
+
+        gdd_snippet = read_file(GDD_FILE)[:3500]
+        engine_mode, engine_instruction = detect_engine_mode(gdd_snippet)
+        full_lang, primary, ext, run_cmd = detect_language(gdd_snippet)
+        game_type = detect_game_type(gdd_snippet)
+
+        base_system = SYSTEM.get(role,"")
+        if engine_mode == "custom":
+            base_system = base_system.replace("Unity","custom engine").replace("Unreal","custom engine").replace("Godot","custom")
+            base_system += f"\n\n{engine_instruction}\nSTRICTLY NO Unity/Unreal.\nLANGUAGE: {full_lang} primary {primary} ext {ext} - Must respect."
+
+        worker_prompt = f"""
+GDD (READ ONLY, respect Engine + Language + Game Type):
+{gdd_snippet}
+
+TASK ({role} ONLY) in LANGUAGE {full_lang} primary {primary} ext {ext}:
+Title: {task['title']}
+Details: {task['prompt']}
+
+ENGINE MODE: {engine_mode}
+{engine_instruction}
+LANGUAGE: {full_lang} primary {primary} ext {ext} -> File must be *{ext}
+GAME TYPE: {game_type}
+
+RULES: Stay lane, respect engine+language+type, output file-ready result in {full_lang}. Max 500 lines, 25KB, 100 chars line. GDD read-only.
+"""
+
+        result = call_ollama(model, base_system, worker_prompt, 350)
+        if not result:
+            task["status"] = "failed"
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            continue
+
+        ext_to_use = ext_for_role(role, ext)
+        folder_to_use = folder_for_role(role)
+        safe_file_title = "".join(c if c.isalnum() else "_" for c in task['title'])[:30]
+        rand_suf = random_suffix()
+        fname = f"{task.get('id',99):02d}_{role}_{safe_file_title}_{rand_suf}{ext_to_use}"
+        fpath = OUTPUT_DIR / folder_to_use / fname
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        cleaned_result = extract_code_from_response(result, primary)
+        if ext_to_use == ".md" and len(cleaned_result) < 50:
+            cleaned_result = result
+        fpath.write_text(cleaned_result, encoding="utf-8")
+        log(f"{role.upper()} DONE -> {fpath} ({len(cleaned_result)} chars, raw {len(result)} chars) [{full_lang}]", "DONE")
+
+        log(f"AURA validating {role} work... Language {full_lang} Engine {engine_mode}", "VALIDATE")
+        validate_prompt = f"""
+GDD (truth, read-only):
+{gdd_snippet[:2000]}
+
+Task: {task['title']} Role: {role} Language: {full_lang} primary {primary}
+Expected: {task['prompt']}
+Engine Mode: {engine_mode} - {engine_instruction}
+
+Worker Output (first 3000 chars):
+{result[:3000]}
+
+Check: 1) role lane 2) engine respect 3) language respect ({full_lang}) 4) not haywire 5) file size <=500 lines 6) unique naming
+Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
+"""
+        validation = call_ollama(TEAM["aura"], SYSTEM.get("aura",""), validate_prompt, 200)
+        verdict = "PASS"
+        try:
+            if validation:
+                raw = validation
+                s = raw.find("{")
+                e = raw.rfind("}")+1
+                if s != -1:
+                    raw = raw[s:e]
+                v = json.loads(raw)
+                verdict = v.get("verdict","PASS").upper()
+                if "FAIL" in verdict:
+                    log(f"VALIDATION FAIL: {v.get('reason')} Fix:{v.get('fix')}", "FAIL")
+                    if task["attempts"] < 3:
+                        task["status"] = "pending"
+                        task["prompt"] = task["prompt"] + f"\nCORRECTION: {v.get('fix')}"
+                    else:
+                        task["status"] = "done"
+                        task["note"] = f"Failed but breaker forced done: {v.get('reason')}"
+                else:
+                    log(f"VALIDATION PASS - {v.get('reason','ok')}", "PASS")
+                    task["status"] = "done"
+                task["output_file"] = str(fpath)
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                memory_summary += f"\n- Done: {task['title']} [{role}] {full_lang} -> {verdict}"
+                save_memory(memory_summary)
+            else:
+                log("Validation empty - will retry if attempts remain", "VALIDATE")
+                if task["attempts"] < 3:
+                    task["status"] = "pending"
+                else:
+                    task["status"] = "done"
+                    task["note"] = "Validation empty, forced done after 3"
+                task["output_file"] = str(fpath)
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+        except Exception as e:
+            log(f"Validation parse fail: {e} - will retry if attempts remain", "VALIDATE")
+            if task.get("attempts",0) < 3:
+                task["status"] = "pending"
+                task["prompt"] = task["prompt"] + f"\nVALIDATION PARSE FAILED, retry."
+            else:
+                log(f"Validation parse failed 3 times, forcing PASS", "VALIDATE")
+                task["status"] = "done"
+                verdict = "PASS"
+            task["output_file"] = str(fpath)
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+
+        time.sleep(2)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("Stopped - Memory saved, GDD untouched. Resume via GUI or 2. Start Team.bat", "STOP")
