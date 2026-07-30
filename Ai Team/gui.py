@@ -8,7 +8,7 @@ Minimal GUI v2 - Ai Team Control Panel - No Manual File Nonsense, No Direct GDD 
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
+from tkinter import ttk, scrolledtext, messagebox, simpledialog
 import json
 import subprocess
 import threading
@@ -66,7 +66,7 @@ def detect_from_gdd():
                     engine = eng_line
                 break
         return engine, full_lang, gtype, txt
-    except Exception as e:
+    except Exception:
         # Fallback to old logic if import fails
         lower = txt.lower()
         engine = "Custom from scratch"
@@ -309,7 +309,6 @@ class AiTeamGUIv2:
             pending = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
             done = len([t for t in tasks if t.get("status")=="done"])
             # Parallel estimation
-            vram_map = {"qwen3:14b": 9, "devstral:24b": 14, "qwen2.5-coder:14b": 8.8, "gemma3:12b": 7.8, "deepseek-r1:14b": 9.5, "gemma3:4b": 3.3}
             parallel_max = 2  # For 16GB VRAM, max 2 small models
             self.stats_label.config(text=f"Tasks: {len(tasks)} total\nPending: {pending}\nDone: {done}\nPAUSE: { (BASE / 'PAUSE').exists() }\nParallel Max: {parallel_max} models in 16GB VRAM")
 

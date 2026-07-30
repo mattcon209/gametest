@@ -92,11 +92,21 @@ def preflight_models():
     try:
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        pulled = {m.get("name", "").lower() for m in data.get("models", [])}
+        pulled = {m.get("name", "").lower() for m in data.get("models", []) if m.get("name")}
         missing = []
         for role, model in TEAM.items():
             base = model.lower()
-            if not any(p == base or p.startswith(base.split(":")[0] + ":") for p in pulled):
+            # REGRESSION FIX (Audit6): match the TAG EXACTLY. The previous
+            # startswith(base.split(":")[0] + ":") test meant any gemma3:* satisfied
+            # a requirement for gemma3:4b - so a machine with only gemma3:12b pulled
+            # was reported "all 8 role models present" while AUDIO's model was absent
+            # (different model entirely: 3.3GB vs 7.8GB VRAM). Verified by test.
+            # Only fall back to prefix logic when the requirement itself is untagged.
+            if ":" in base:
+                ok = base in pulled or f"{base}:latest" in pulled
+            else:
+                ok = any(p == base or p.startswith(base + ":") for p in pulled)
+            if not ok:
                 missing.append((role, model))
         if missing:
             log(f"PREFLIGHT: {len(missing)} model(s) NOT pulled:", "PREFLIGHT")
@@ -327,7 +337,6 @@ def extract_code_from_response(result, primary="python"):
     """FIX C5: Strip markdown, code fences, <think> blocks, prose - worker path"""
     if not result:
         return result
-    original = result
     # Remove <think>...</think> blocks (deepseek-r1 reasoning)
     result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL | re.IGNORECASE)
     # Remove <thinking> blocks
@@ -709,7 +718,6 @@ def main():
 
             # INTEGRATOR / COMPILE - Guaranteed finish
             should_build = False
-            main_path_check = BUILD_DIR / f"main{ext}"
             # Also check any main.* exists
             any_main = any((BUILD_DIR / f"main{e}").exists() for e in [".py",".cpp",".cs",".lua",".gd",".rs",".js",".ts"])
             if len(pending) == 0 and len(existing_files) >= 1:
@@ -973,7 +981,7 @@ JSON only.
                     if not (BUILD_DIR / "DONE").exists():
                         (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
                 else:
-                    log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
+                    log("Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
                 time.sleep(15)
                 continue
 
@@ -1273,9 +1281,9 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
             log(f"Validation parse fail: {e} - will retry if attempts remain", "VALIDATE")
             if task.get("attempts",0) < 3:
                 task["status"] = "pending"
-                task["prompt"] = task["prompt"] + f"\nVALIDATION PARSE FAILED, retry validating strictly."
+                task["prompt"] = task["prompt"] + "\nVALIDATION PARSE FAILED, retry validating strictly."
             else:
-                log(f"Validation parse failed 3 times, forcing PASS to prevent deadlock (was silent PASS after 1st before)", "VALIDATE")
+                log("Validation parse failed 3 times, forcing PASS to prevent deadlock (was silent PASS after 1st before)", "VALIDATE")
                 task["status"] = "done"
                 verdict = "PASS"
             task["output_file"] = str(fpath)

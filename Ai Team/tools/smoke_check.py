@@ -53,9 +53,44 @@ for f in code_py:
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as tmp:
             py_compile.compile(str(f), cfile=tmp.name, doraise=True)
         compiled += 1
-    except py_compile.PyCompileError as e:
+    except py_compile.PyCompileError:
         failed.append(f.name)
 check(not failed, f"output/code fragments compile: {compiled}/{len(code_py)} OK", f"fragments FAIL py_compile: {failed}")
+
+# 2b. LANGUAGE-AGNOSTIC fragment sanity (Audit6 gap fix).
+# py_compile only covers Python. On a C++/Lua/GDScript/Rust project the checker
+# previously inspected ZERO files and still printed "ALL PASS" - a broken build
+# was indistinguishable from a good one. These checks need no toolchain: they
+# catch the two regressions that actually recur (raw markdown fences and
+# deepseek <think> blocks leaking into source, i.e. C5/F9-class failures).
+SRC_EXTS = {".cpp", ".hpp", ".h", ".cs", ".lua", ".gd", ".rs", ".js", ".ts", ".go", ".java", ".shader"}
+non_py = sorted(p for p in (OUTPUT_DIR / "code").glob("*.*")
+                if p.suffix.lower() in SRC_EXTS) if (OUTPUT_DIR / "code").exists() else []
+polluted = []
+for f in non_py:
+    try:
+        t = f.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        continue
+    if "```" in t or "<think>" in t.lower():
+        polluted.append(f.name)
+if non_py:
+    check(not polluted,
+          f"non-Python fragments clean of fences/<think>: {len(non_py) - len(polluted)}/{len(non_py)} OK",
+          f"fragments contain raw markdown/<think>: {polluted}")
+
+# 2c. the build entry point itself must be clean source, whatever the language.
+for m in main_candidates:
+    try:
+        t = m.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        continue
+    check("```" not in t and "<think>" not in t.lower(),
+          f"{m.name} is clean source (no fences/<think>)",
+          f"{m.name} contains raw markdown fences or <think> blocks - extraction failed")
+    check(len(t.strip()) >= 10,
+          f"{m.name} is non-trivial ({len(t.strip())} chars)",
+          f"{m.name} is effectively empty ({len(t.strip())} chars)")
 
 # 3. build/main.py itself compiles (if python)
 main_py = BUILD_DIR / "main.py"
