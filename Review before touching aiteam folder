@@ -6,12 +6,16 @@ Method: read every file, trace against Audits 1–5 + spec docs, then PROVE ever
 claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 ================================================================================
 
->>> CURRENT STATE: HEAD 470cf20. Parts 0–5 below are the v6.7 fix-round report
->>> (written at 537af98). PART 6 is a later INDEPENDENT audit that re-verified
->>> every claim in Parts 0–5 by execution, found 1 regression + 1 gap, and fixed
->>> both. If Parts 0–5 and Part 6 disagree, Part 6 is newer and was re-tested.
->>> Read 6.2 (what was wrong), 6.4 (still open) and 6.5 (standing advice)
->>> before changing anything.
+>>> CURRENT STATE: PART 8 is the newest section — read it first.
+>>> This file is append-only and layered. Later parts supersede earlier ones:
+>>>   Parts 0–5  v6.7 fix-round report (written at 537af98)
+>>>   Part 6     independent audit #6 + repair (at 470cf20)
+>>>   Part 7     audit round 7 + repair (at 18817a1)
+>>>   Part 8     independent audit #8 + repair (at HEAD) <- CURRENT
+>>> Each part re-verified the one before it by execution. Where they disagree,
+>>> the HIGHER-numbered part is newer and was re-tested.
+>>> Before changing anything read: 8.2 (what was wrong), 8.4 (still open),
+>>> 6.5 + 8.5 (standing advice).
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -538,4 +542,187 @@ V6  RESUME TEST: seeded pending queue + matching state.json -> workers
 - GUI parallel label is an estimate, not a live executor readout.
 - PAUSE granularity: still checked at loop top (up to one long LLM call late).
 Everything from 6.4 not restated here still applies; nothing was hidden.
+================================================================================
+
+
+================================================================================
+================================================================================
+PART 8 — INDEPENDENT AUDIT #8 + REPAIR (newest section)
+Auditor: Arena agent (author of Audits 1–7)
+Audited: 18817a1 ("Audit7 repair: validate-before-write, true resume, M9 size
+gate, GUI detection wiring") · Repaired and pushed same day
+Method: fresh clone, full diff review, then PROVE every claim by execution —
+mock-Ollama end-to-end runs (Python AND C++), an always-FAIL validator stress
+test, a two-scenario resume test, a live M9 monolith test, unit assertions, and
+negative controls on the verifier. Nothing taken on trust.
+================================================================================
+
+--------------------------------------------------------------------------------
+8.0 — CONTEXT
+--------------------------------------------------------------------------------
+18817a1 targeted four items straight off Part 6.4 / 7.4's "still open" list:
+validate-before-write, true resume, the M9 size gate, and GUI/orchestrator
+detection agreement. It also quietly fixed the H4 diversity blind spot.
+Unlike several earlier rounds, THE CLAIMS IN THIS COMMIT ALL HELD UP.
+That is a first for this repo and worth recording plainly.
+
+--------------------------------------------------------------------------------
+8.1 — VERIFICATION OF 18817a1 / PART 7 (all confirmed by execution)
+--------------------------------------------------------------------------------
+R1  VALIDATE-BEFORE-WRITE — CONFIRMED, and it is the most valuable change in
+    the commit. Fragments are now prepared in memory and only written to
+    output/ after validation PASSes (or on the final attempt, as evidence).
+    STRESS TEST, validator wired to FAIL every task:
+        before (6.4/7.4): 3 garbage fragments per task
+        after:             1 file per role — code 2, lore 1, art 1, qa 1, audio 1
+        12 "re-queued, no file written" events logged
+        attempts still bounded at exactly 3, zero tasks stuck "failed"
+    This closes the "output pollution" item in 6.4/7.4 and, more importantly, stops
+    junk fragments reaching INTEGRATOR.
+
+R2  TRUE RESUME — CONFIRMED, via new state.json persisting last_gdd_mtime.
+    Scenario A (restart, GDD untouched, 2 pending tasks): 0 AURA planning
+    calls; both seeded tasks executed directly. Previously last_gdd_mtime
+    started at 0 every boot, so every restart looked like "GDD changed",
+    planning fired, and the queue was discarded.
+    Scenario B (state.json holds a STALE mtime, i.e. GDD edited while the
+    system was DOWN): correctly detects the change, snapshots the GDD, and
+    replans. The check is mtime INEQUALITY, not >, so clock skew or a restored
+    older GDD is also caught. Both directions are right.
+
+R3  M9 SIZE GATE — CONFIRMED as real enforcement, not prompt text.
+    file_too_big() unit matrix 7/7: 501 lines caught, >25KB caught, 6 imports
+    caught, 5 imports allowed, C++ #include counting works, .md exempt from
+    the import rule, small files pass.
+    LIVE TEST with a mock returning a 600-line monolith: two "M9 GATE FAIL …
+    re-queued, no file written" cycles, then on the final attempt the file is
+    written WITH a note. That last part is a deliberate, correct tradeoff —
+    forcing a write on attempt 3 prevents a task deadlocking forever against a
+    model that will not comply. Worth knowing: oversized files CAN still land,
+    but only on the final attempt and only flagged.
+
+R4  H4 DIVERSITY BLIND SPOT — CONFIRMED FIXED. Presence is now detected by
+    role prefix inside filenames (`_forge_`, `_spark_`) instead of "is the
+    folder non-empty". forge and spark share output/code, so a FORGE-only run
+    used to make SPARK look present — the exact runaway the check exists to
+    prevent. Verified: with only a forge file present, spark is correctly
+    reported missing. Forced-diversity tasks now also carry the full
+    ENGINE/LANGUAGE/lane rule stack, which they previously bypassed.
+
+R5  GUI/ORCHESTRATOR AGREEMENT — CONFIRMED. The status bar now reports what
+    studio.py's detectors say via detect_from_gdd(), with the combo boxes only
+    as fallback. Ends the M4/M5 class of GUI-vs-engine disagreement.
+
+Also re-confirmed still holding at this HEAD: language matrix 11/11,
+zero <think> leaks in source fragments, preflight tag-exact matching (my Part
+6.2/A1 fix survived), num_ctx 8192 + keep_alive 5m + per-role temperature
+asserted on every request inside the mock, build/main.* is real LLM output not
+the placeholder, post-build SMOKE all-pass, stable IDLE, and the GDD read-only
+invariant — now 7 consecutive revisions with zero writes to GDD_FILE.
+
+--------------------------------------------------------------------------------
+8.2 — WHAT I FOUND WRONG (2 items, both fixed in this commit)
+--------------------------------------------------------------------------------
+
+B1  [GAP — MEDIUM] .md deliverables were covered by NO smoke check at all.
+    My own Part 6.2/A2 work added source-extension checks (.cpp/.lua/.gd/…)
+    and the existing checks covered .py — but .md fell through both. LORE and
+    GLITCH write .md exclusively, so their entire output was unverified.
+    FOUND IT the honest way: a C++ end-to-end run left content in
+    output/qa/*.md and output/lore/*.md that no check inspected, and
+    smoke_check still printed ALL PASS.
+    Investigated before fixing: <think> was correctly stripped (0 occurrences
+    — F9 genuinely holds). What remained was raw fences/prose from the .md
+    fallback branch, which for a prose deliverable is not obviously wrong.
+    So the fix distinguishes the two:
+      · <think> in any .md  -> FAIL. Reasoning blocks are never a deliverable.
+      · ``` fences in .md   -> INFO only. Fenced code in markdown is normal.
+    Covers lore/, qa/, code/, art/, audio/.
+    VERIFIED positive: the C++ run reports "markdown with fenced blocks
+    (normal for .md): 2/2" and stays green.
+    VERIFIED negative (control): injecting <think> into a qa/*.md produces
+    "FAIL markdown contains <think> reasoning blocks" and a non-zero result.
+
+B2  [LATENT — LOW] The parallel lane computed the file extension twice from
+    two separate GDD reads. The worker thread built fpath from one
+    detect_language() call; the validation step ran detect_language() AGAIN
+    to derive ext_to_use for the M9 gate. Same GDD, so normally identical —
+    but a GDD edited mid-batch would give the M9 gate a different extension
+    than the file was actually named with (e.g. applying the .md import
+    exemption to a .py fragment).
+    FIXED by deriving the extension from fpath.suffix — the path the worker
+    already built is the single source of truth. Also removes a redundant
+    file read per validated task.
+    Not observed in the wild; caught by reading the refactor. Recorded as
+    latent rather than dressed up as a live bug.
+
+pyflakes across studio.py + gui.py + tools/smoke_check.py: 0 issues (kept).
+
+--------------------------------------------------------------------------------
+8.3 — FULL REGRESSION AT THIS HEAD (all green)
+--------------------------------------------------------------------------------
+Python e2e:   preflight OK · payload params asserted · build/main.py = real
+              LLM output · 2/2 fragments compile · zero <think> leaks ·
+              SMOKE ALL PASS · state.json written · stable IDLE
+C++ e2e:      correct .cpp fragment extensions · build/main.cpp produced ·
+              entry point clean · md checks now run · SMOKE ALL PASS
+Always-FAIL:  1 file per role (was 3) · attempts capped at 3 · none stuck
+Resume A:     restart, GDD untouched -> 0 planning calls, queue resumed
+Resume B:     stale state.json -> change detected, snapshot, replan
+M9 live:      600-line monolith -> 2 rejections, final-attempt write w/ note
+
+--------------------------------------------------------------------------------
+8.4 — STILL OPEN (carried forward, nothing hidden)
+--------------------------------------------------------------------------------
+· M8 — unique-splitting / facade registry: still 0 occurrences, and Part 7
+  argues this is DELIBERATE, not an oversight. Having re-read that reasoning
+  against the code, I agree and am recording my agreement rather than
+  re-raising M8 as a defect in every future audit:
+    - the spec's split protocol assumes a worker returns MULTIPLE files;
+      this system returns exactly one file per task attempt, so a facade
+      registry would be scaffolding shaped like a feature — the exact
+      failure mode Parts 1–7 kept catching;
+    - the enforcement that matters already exists: M9 rejects the oversize
+      fragment and injects a split instruction, and AURA can plan the split
+      as sibling tasks (dedup permits distinct titles).
+  VERIFIED consistent with the code: M9's re-queue message does instruct a
+  split, and titles_similar allows genuinely distinct sibling titles through.
+  RECOMMENDATION: treat M8 as CLOSED-BY-DESIGN. If it is ever built, it must
+  be proven the 8.5/9 way — monolith in, named parts + facade out, smoke check
+  confirming the parts are real files — and not merely a registry dict.
+· Oversized files can still land on the final attempt (by design, see R3) —
+  flagged with a note, but they do reach output/.
+· max-parallel is effectively 1 whenever FORGE is queued first (devstral:24b
+  ~14GB vs a 15GB budget). Physics, not a bug; light roles do pair.
+· smoke_check compiles .py only. Other languages get fence/<think>/non-trivial
+  checks but no syntax validation (no toolchains assumed on the target box).
+· GUI "Parallel: Running" is still an estimate from pending>1, not a live
+  executor readout. (The status BAR is now accurate — this label is not.)
+· Startup replan when the queue is EMPTY is still by design; R2 only fixes the
+  non-empty-queue restart case, which was the actual complaint.
+
+--------------------------------------------------------------------------------
+8.5 — STANDING ADVICE (additions to 6.5 and Part 7, which still apply)
+--------------------------------------------------------------------------------
+6. When a verifier passes, ask what it did NOT look at. Both problems in this
+   round (B1) and the last (A2) were blind spots in the checker itself, not
+   failures it reported. A green check on zero inspected files is the most
+   dangerous output in this project.
+7. Before "fixing" leaked content, check WHICH kind leaked. Here <think> was
+   already handled and only markdown fences remained — and fences in a .md
+   file are legitimate. Treating all leakage identically would have added a
+   false-alarm check that people learn to ignore.
+8. Derive values from what already exists rather than recomputing them (B2).
+   This codebase has repeatedly been bitten by two code paths computing "the
+   same" thing from separate reads — the three length gates behind N1 were the
+   same shape of problem.
+9. M8 is closed-by-design (see 8.4 and Part 7 R6). Do not "implement" it as a
+   registry dict to tick a spec box — that is the scaffolding-shaped-like-a-
+   feature pattern this file exists to prevent. If a real need appears, prove
+   it end to end: a monolith goes in, named part files plus a working facade
+   come out, and the smoke check confirms the parts exist on disk.
+10. Two agents now append to this file. Number your section one higher than the
+    highest existing PART, state which commit you audited, and never renumber
+    someone else's section — this round shipped a Part 8 because a Part 7
+    already existed for 18817a1.
 ================================================================================

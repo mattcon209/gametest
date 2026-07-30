@@ -79,6 +79,27 @@ if non_py:
           f"non-Python fragments clean of fences/<think>: {len(non_py) - len(polluted)}/{len(non_py)} OK",
           f"fragments contain raw markdown/<think>: {polluted}")
 
+# 2d. Audit7 gap: .md role output (lore/, qa/) was covered by NO check at all.
+# Audit6 added source-extension checks; .md fell through both, so a LORE/GLITCH
+# file could carry deepseek <think> reasoning and still report ALL PASS.
+# <think> in a deliverable is always a defect. Fenced code inside .md is normal
+# markdown, so it is reported as INFO only, not a failure.
+md_files = []
+for sub in ("lore", "qa", "code", "art", "audio"):
+    d = OUTPUT_DIR / sub
+    if d.exists():
+        md_files.extend(sorted(d.glob("*.md")))
+md_think = [f.name for f in md_files
+            if "<think>" in f.read_text(encoding="utf-8", errors="replace").lower()]
+if md_files:
+    check(not md_think,
+          f"markdown deliverables free of <think> reasoning: {len(md_files) - len(md_think)}/{len(md_files)} OK",
+          f"markdown contains <think> reasoning blocks: {md_think}")
+    md_fenced = [f.name for f in md_files
+                 if "```" in f.read_text(encoding="utf-8", errors="replace")]
+    if md_fenced:
+        print(f"INFO  markdown with fenced blocks (normal for .md): {len(md_fenced)}/{len(md_files)}")
+
 # 2c. the build entry point itself must be clean source, whatever the language.
 for m in main_candidates:
     try:

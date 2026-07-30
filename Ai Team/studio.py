@@ -1172,8 +1172,13 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                     continue
                 fpath, cleaned, raw_result = res
                 role = task_item.get("role", "forge")
-                _fl_p, _prim_p, ext_p, _rc_p = detect_language(read_file(GDD_FILE)[:3500])
-                ext_to_use = ext_for_role(role, ext_p)
+                # Audit7: derive the extension from the path the worker ALREADY built
+                # rather than re-reading and re-detecting from the GDD. The old code
+                # ran detect_language() a second time here, so a GDD edited mid-batch
+                # could give the M9 gate a different extension than the file was named
+                # with (e.g. applying the .md import exemption to a .py fragment).
+                # fpath is authoritative - one source of truth, and one less GDD read.
+                ext_to_use = fpath.suffix
 
                 too_big, big_reason = file_too_big(cleaned, ext_to_use)
                 if too_big and tt.get("attempts",0) < 3:
