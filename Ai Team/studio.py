@@ -27,6 +27,7 @@ def get_gdd_path():
     return BASE / "5. GDD.md"
 
 GDD_FILE = get_gdd_path()
+STATE_FILE = BASE / "state.json"
 INBOX_FILE = BASE / "INBOX.txt"
 INBOX_HISTORY = BASE / "inbox_history.txt"
 TASKS_FILE = BASE / "tasks.json"
@@ -423,6 +424,31 @@ def strip_thinking(text):
     return text.strip()
 
 
+def file_too_big(text, ext):
+    """M9 ENFORCEMENT: the 500-line / 25KB spec limits lived only inside prompt
+    strings since v6 (SAFEGUARDS #16 unimplemented). This is the real gate.
+    Returns (is_too_big, reason). Code exts also get an import-count check
+    (>5 project imports = monolith risk per spec)."""
+    if not text:
+        return False, ""
+    lines = text.count("\n") + 1
+    size = len(text.encode("utf-8", errors="replace"))
+    reasons = []
+    if lines > 500:
+        reasons.append(f"{lines} lines exceeds 500-line max")
+    if size > 25 * 1024:
+        reasons.append(f"{size} bytes exceeds 25KB max")
+    if ext in {".py", ".cpp", ".cs", ".lua", ".gd", ".rs", ".js", ".ts"}:
+        if ext == ".py":
+            imports = len(re.findall(r"^\s*(?:import|from)\s+\S+", text, re.M))
+        elif ext in {".cpp", ".cs"}:
+            imports = len(re.findall(r"^\s*(?:#include|using)\s+\S+", text, re.M))
+        else:
+            imports = len(re.findall(r"^\s*(?:require|import|use)\s*\(?[\'\"]", text, re.M))
+        if imports > 5:
+            reasons.append(f"{imports} imports exceeds 5-import max (monolith risk)")
+    return (bool(reasons), "; ".join(reasons))
+
 def random_suffix():
     return f"{random.randint(0, 0xFFFF):04x}"
 
@@ -642,7 +668,20 @@ def main():
             tasks = []
 
     memory_summary = read_file(MEMORY_FILE) or "No memory yet."
+    # RESUME FIX: persist the last-seen GDD mtime in state.json. Before this,
+    # last_gdd_mtime started at 0 on every boot, so EVERY restart counted as
+    # "GDD changed" -> planning fired -> the pending queue was dropped and the
+    # system RE-PLANNED instead of resuming (audit 6.4). Now: restart with an
+    # unchanged GDD + a non-empty queue skips planning and goes straight to the
+    # workers. Replan only when the GDD actually changed, or the queue is empty.
     last_gdd_mtime = 0
+    try:
+        if STATE_FILE.exists():
+            last_gdd_mtime = json.loads(read_file(STATE_FILE)).get("last_gdd_mtime", 0)
+            if last_gdd_mtime:
+                log(f"Resume state loaded - GDD mtime {last_gdd_mtime} (restart without GDD edit resumes, not replans)", "RESUME")
+    except Exception:
+        last_gdd_mtime = 0
     inbox_directive_global = ""
 
     while True:
@@ -659,6 +698,10 @@ def main():
             INBOX_FILE.write_text("", encoding="utf-8")
             last_gdd_mtime = 0
             try:
+                STATE_FILE.write_text(json.dumps({"last_gdd_mtime": 0}), encoding="utf-8")
+            except Exception:
+                pass
+            try:
                 with open(INBOX_HISTORY, "a", encoding="utf-8") as f:
                     f.write(f"\n[{datetime.now()}] {inbox}\n")
             except: pass
@@ -674,6 +717,10 @@ def main():
             if gdd_changed:
                 log(f"{GDD_FILE.name} changed! Re-reading GDD read-only...", "AURA")
                 last_gdd_mtime = cur_mtime
+                try:
+                    STATE_FILE.write_text(json.dumps({"last_gdd_mtime": cur_mtime}), encoding="utf-8")
+                except Exception:
+                    pass
                 snapshot_gdd("gdd_changed")
                 # Remove DONE to allow rebuild
                 done_path = BUILD_DIR / "DONE"
@@ -910,11 +957,13 @@ JSON only.
                 
                 missing_roles = []
                 for required_role in ["forge","spark","lore","pixel","glitch","audio"]:
-                    # Check if role folder has files
+                    # Check by ROLE PREFIX inside filenames, not folder-nonempty:
+                    # forge and spark SHARE output/code, so a FORGE-only run made
+                    # spark look "present" - exactly the runaway this check is for
                     role_folder = BASE / "output" / {"forge":"code","spark":"code","lore":"lore","pixel":"art","glitch":"qa","audio":"audio"}.get(required_role,"code")
                     has_files = False
                     if role_folder.exists():
-                        has_files = any(role_folder.glob("*.*"))
+                        has_files = any(f"_{required_role}_" in f.name.lower() for f in role_folder.glob("*.*"))
                     if not has_files and required_role not in [t.get("role") for t in filtered]:
                         missing_roles.append(required_role)
                 
@@ -926,7 +975,9 @@ JSON only.
                                 "id": next_id,
                                 "role": mr,
                                 "title": f"Missing {mr} system for {game_type} {full_lang}",
-                                "prompt": f"Create {mr} system for {game_type} game in {full_lang}. This role was missing in output/ and is required for full team diversity.",
+                                # Same rule stack as AURA-planned tasks - forced tasks
+                                # previously bypassed the ENGINE/LANGUAGE/lane locks
+                                "prompt": f"Create {mr} system for {game_type} game in {full_lang}. This role was missing in output/ and is required for full team diversity." + f"\n\nENGINE RULE: {engine_instruction}\nLANGUAGE RULE: Build in {full_lang} primary {primary} ext {ext}\nSTRICT: {mr} ONLY.",
                                 "status": "pending",
                                 "attempts": 0,
                                 "created_at": str(datetime.now())
@@ -1077,8 +1128,11 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                 cleaned = extract_code_from_response(result, prim)
                 if ext_to_use == ".md" and len(cleaned) < 50:
                     cleaned = strip_thinking(result)  # think-stripped, never raw reasoning blocks
-                fpath.write_text(cleaned, encoding="utf-8")
-                return (t_item, (fpath, cleaned, result), "done")
+                # VALIDATE-BEFORE-WRITE: prepare only, no disk write here. A fragment
+                # hits output/ only if validation PASSes (or on the final attempt as
+                # evidence). Old flow wrote first, so an always-FAIL task left 3
+                # garbage fragments (audit 6.4 "output pollution").
+                return (t_item, (fpath, cleaned, result), "prepared")
 
             # Execute parallel
             results = []
@@ -1094,57 +1148,78 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                         log(f"Parallel task {t['title']} failed: {e}", "ERROR")
                         results.append((t, None, "failed"))
 
-            # Save all results to tasks.json and validate each sequentially (AURA validation sequential to avoid VRAM spike)
+            # Bookkeep breaker/failed outcomes first
             for task_item, res, status in results:
-                # Find task in main tasks list
                 for tt in tasks:
                     if tt.get("id") == task_item.get("id"):
                         if status == "skipped_breaker":
-                            # FIX: old code fell into the res-is-None branch and marked the
-                            # task "failed" - and "failed" tasks are re-selected as pending
-                            # every cycle, so a breaker-skipped task was re-dispatched in a
-                            # 2-second tight loop forever. Mark done like the sequential path.
                             tt["status"] = "done"
                             tt["note"] = "Skipped by loop breaker (parallel)"
                             log(f"LOOP BREAKER: Skip {tt['title']} after {tt.get('attempts',0)} attempts (parallel)", "BREAKER")
                         elif status == "failed" or res is None:
                             tt["status"] = "failed"
-                        else:
-                            tt["status"] = "done"
-                            tt["output_file"] = str(res[0])
-                            # attempts already incremented BEFORE the call in
-                            # process_one_task - do NOT increment again (was double-count)
                         break
             TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
 
-            # Validate each result sequentially
+            # Validate prepared results (sequentially, to avoid VRAM spike) and ONLY
+            # THEN write fragments to output/ (validate-before-write). M9 size gate
+            # runs before validation; oversize or FAIL re-queues with no disk write.
             for task_item, res, status in results:
-                if status == "failed" or res is None:
+                if status != "prepared" or res is None:
+                    continue
+                tt = next((x for x in tasks if x.get("id") == task_item.get("id")), None)
+                if tt is None:
                     continue
                 fpath, cleaned, raw_result = res
+                role = task_item.get("role", "forge")
+                _fl_p, _prim_p, ext_p, _rc_p = detect_language(read_file(GDD_FILE)[:3500])
+                ext_to_use = ext_for_role(role, ext_p)
+
+                too_big, big_reason = file_too_big(cleaned, ext_to_use)
+                if too_big and tt.get("attempts",0) < 3:
+                    tt["status"] = "pending"
+                    tt["prompt"] += f"\nM9 SIZE GATE: {big_reason}. Split into a smaller single-responsibility file (spec: max 500 lines / 25KB / 5 imports)."
+                    log(f"M9 GATE FAIL: {task_item['title']} - {big_reason} - re-queued, no file written", "M9")
+                    TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                    continue
+                if too_big:
+                    tt["note"] = f"Oversize forced done on final attempt: {big_reason}"
+                    log(f"M9 GATE: {task_item['title']} oversize on final attempt - writing with note", "M9")
+
                 gdd_snip = read_file(GDD_FILE)[:2000]
-                full_l, prim, ext_, run_c = detect_language(gdd_snip)
-                eng_mode, eng_instr = detect_engine_mode(gdd_snip)
-                validate_prompt = f"""GDD: {gdd_snip[:2000]}\nTask: {task_item['title']} Role: {task_item.get('role')} Expected: {task_item['prompt']}\nOutput: {raw_result[:3000]}\nCheck 1) role lane 2) engine 3) language\nOutput JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}"""
+                validate_prompt = f"""GDD: {gdd_snip[:2000]}\nTask: {task_item['title']} Role: {role} Expected: {task_item['prompt']}\nOutput: {raw_result[:3000]}\nCheck 1) role lane 2) engine 3) language\nOutput JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}"""
                 validation = call_ollama(TEAM["aura"], SYSTEM.get("aura",""), validate_prompt, 200)
+                verdict = "PASS"
+                v_fix = ""
                 try:
                     if validation:
-                        import json as _json
                         raw_v = validation
                         s = raw_v.find("{")
                         e = raw_v.rfind("}")+1
                         if s != -1:
                             raw_v = raw_v[s:e]
-                        v = _json.loads(raw_v)
+                        v = json.loads(raw_v)
                         verdict = v.get("verdict","PASS").upper()
-                        if "FAIL" in verdict:
-                            for tt in tasks:
-                                if tt.get("id") == task_item.get("id") and tt.get("attempts",0) < 3:
-                                    tt["status"] = "pending"
-                                    tt["prompt"] = tt["prompt"] + f"\nCORRECTION: {v.get('fix')}"
-                        TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+                        v_fix = str(v.get("fix",""))[:300]
                 except Exception as e:
                     log(f"Validation parse fail parallel: {e}", "VALIDATE")
+                    verdict = "PARSE_FAIL"
+
+                if ("FAIL" in verdict or verdict == "PARSE_FAIL") and tt.get("attempts",0) < 3:
+                    tt["status"] = "pending"
+                    if "FAIL" in verdict:
+                        tt["prompt"] = tt["prompt"] + f"\nCORRECTION: {v_fix}"
+                    else:
+                        tt["prompt"] = tt["prompt"] + "\nVALIDATION PARSE FAILED, retry validating strictly."
+                    log(f"VALIDATION FAIL/retry (parallel): {task_item['title']} - re-queued, no file written", "VALIDATE")
+                else:
+                    fpath.write_text(cleaned, encoding="utf-8")
+                    tt["status"] = "done"
+                    tt["output_file"] = str(fpath)
+                    if verdict != "PASS" and "FAIL" not in verdict:
+                        tt["note"] = "Validation issue on final attempt, forced done (parallel)"
+                    log(f"Parallel validated + wrote: {task_item['title']} -> {fpath.name} ({len(cleaned)} chars)", "PARALLEL")
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
             time.sleep(2)
             continue
         else:
@@ -1217,10 +1292,22 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
         # For lore/glitch/qa roles (.md), keep original if cleaning would remove too much? But still strip <think>
         if ext_to_use == ".md" and len(cleaned_result) < 50:
             cleaned_result = strip_thinking(result)  # safe raw fallback: think-stripped (old comment lied - raw result still carried <think> blocks)
-        fpath.write_text(cleaned_result, encoding="utf-8")
-        log(f"{role.upper()} DONE -> {fpath} ({len(cleaned_result)} chars, raw {len(result)} chars) [{full_lang}]", "DONE")
+        # M9 SIZE GATE (real enforcement, audited "prompt-only" since v6): reject
+        # oversized fragments BEFORE validation and BEFORE any disk write.
+        too_big, big_reason = file_too_big(cleaned_result, ext_to_use)
+        if too_big and task.get("attempts",0) < 3:
+            task["status"] = "pending"
+            task["prompt"] = task["prompt"] + f"\nM9 SIZE GATE: {big_reason}. Split into a smaller single-responsibility file (spec: max 500 lines / 25KB / 5 imports)."
+            log(f"M9 GATE FAIL: {task['title']} - {big_reason} - re-queued, no file written", "M9")
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            time.sleep(2)
+            continue
+        if too_big:
+            task["note"] = f"Oversize forced done on final attempt: {big_reason}"
+            log(f"M9 GATE: {task['title']} oversize on final attempt - writing with note", "M9")
 
-        # Validation
+        # Validation runs BEFORE the fragment is written (validate-before-write):
+        # a FAIL with attempts remaining leaves no file on disk.
         log(f"AURA validating {role} work... Language {full_lang} Engine {engine_mode}", "VALIDATE")
         validate_prompt = f"""
 GDD (truth, read-only):
@@ -1252,13 +1339,19 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
                     if task["attempts"] < 3:
                         task["status"] = "pending"
                         task["prompt"] = task["prompt"] + f"\nCORRECTION: {v.get('fix')}"
+                        log(f"Re-queued, no file written (attempt {task['attempts']})", "VALIDATE")
                     else:
+                        fpath.write_text(cleaned_result, encoding="utf-8")
                         task["status"] = "done"
                         task["note"] = f"Failed but breaker forced done: {v.get('reason')}"
+                        task["output_file"] = str(fpath)
+                        log(f"{role.upper()} DONE -> {fpath.name} (final attempt, written as evidence)", "DONE")
                 else:
                     log(f"VALIDATION PASS - {v.get('reason','ok')}", "PASS")
+                    fpath.write_text(cleaned_result, encoding="utf-8")
                     task["status"] = "done"
-                task["output_file"] = str(fpath)
+                    task["output_file"] = str(fpath)
+                    log(f"{role.upper()} DONE -> {fpath.name} ({len(cleaned_result)} chars, raw {len(result)} chars) [{full_lang}]", "DONE")
                 TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
                 memory_summary += f"\n- Done: {task['title']} [{role}] {full_lang} -> {verdict}"
                 # Cap in-process growth - disk file is trimmed by save_memory,
@@ -1272,9 +1365,10 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
                 if task["attempts"] < 3:
                     task["status"] = "pending"
                 else:
+                    fpath.write_text(cleaned_result, encoding="utf-8")
                     task["status"] = "done"
                     task["note"] = "Validation empty, forced done after 3 attempts"
-                task["output_file"] = str(fpath)
+                    task["output_file"] = str(fpath)
                 TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
         except Exception as e:
             # FIX H8: Don't silently PASS on first parse fail - retry if attempts remain
@@ -1284,9 +1378,10 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
                 task["prompt"] = task["prompt"] + "\nVALIDATION PARSE FAILED, retry validating strictly."
             else:
                 log("Validation parse failed 3 times, forcing PASS to prevent deadlock (was silent PASS after 1st before)", "VALIDATE")
+                fpath.write_text(cleaned_result, encoding="utf-8")
                 task["status"] = "done"
+                task["output_file"] = str(fpath)
                 verdict = "PASS"
-            task["output_file"] = str(fpath)
             TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
 
         time.sleep(2)

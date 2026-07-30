@@ -444,3 +444,98 @@ Breaker stress (always-FAIL validator):
    listed a dozen fixes for a four-hunk change, which is why every claim in
    this file now has a test behind it instead of a sentence.
 ================================================================================
+
+================================================================================
+PART 7 — AUDIT ROUND 7 + REPAIR (added at HEAD 4b19f0d, pushed after)
+================================================================================
+Auditor: same agent that authored Parts 0–5, returning per request.
+Method: pulled 4b19f0d, re-verified Part 6's repair by execution (preflight
+exact-match unit proven against a stub tag server), then hunted NEW issues in
+the repaired code. All fixes below are proven by the runs in 7.3.
+
+--------------------------------------------------------------------------------
+7.1 — PART 6 REPAIR: RE-VERIFIED, HOLDING
+--------------------------------------------------------------------------------
+- Preflight tag-matching: with only gemma3:12b pulled, preflight correctly
+  reports MISSING [audio] gemma3:4b and does NOT report [pixel]. Verified live
+  against a stub /api/tags server. The regression I introduced in v6.7 was
+  real; the fix is correct. (For the record - that one was mine.)
+- Language-agnostic smoke checks: 3 real checks now run on non-Python builds.
+  Verified in the C++-style fragment matrix. Holding.
+
+--------------------------------------------------------------------------------
+7.2 — NEW FINDINGS FIXED THIS ROUND
+--------------------------------------------------------------------------------
+R1  [HIGH] OUTPUT POLLUTION BY DESIGN: both worker lanes wrote the fragment to
+    disk BEFORE validation ran. An always-FAIL task therefore deposited its
+    full 3 attempts of garbage into output/ (audit 6.4 called this out as
+    bounded-but-polluting). FIXED: validate-before-write in BOTH lanes. Fragments
+    hit disk only on PASS, or on the final attempt (kept as evidence with a
+    note). FAIL-stress went from 3 files/role to 1 file/role with identical
+    task outcomes (see 7.3 V5).
+R2  [HIGH] FAKE CRASH RESUME: last_gdd_mtime was in-memory only, initialised to
+    0 on every boot, so EVERY restart counted as "GDD changed" -> planning
+    fired -> the pending queue was dropped. Docs said "resumes"; code
+    re-planned. FIXED: state.json persists last_gdd_mtime. Restart with an
+    unchanged GDD + non-empty queue now skips planning and dispatches workers
+    first - literal resume. Verified: mock call order on restart was
+    worker,validator,worker,validator,integrator,planner - planner not called
+    until the recovered queue had drained and the build finished. (An INBOX
+    directive or GDD edit still forces a proper replan.)
+R3  [MED] GUI TOP BAR WAS THEATRE: refresh_all displayed the New-Project
+    combo-box values even when the GDD said otherwise; detect_from_gdd()
+    (which imports the studio detectors, the M4/M5 fix) existed but was never
+    called. FIXED: the bar now shows what studio.py will actually detect.
+R4  [MED] FORCED-DIVERSITY TASKS BYPASSED THE RULE STACK: tasks the diversity
+    fixer injects were added AFTER the loop that appends ENGINE RULE /
+    LANGUAGE RULE / lane-lock to prompts, so forced tasks ran without them
+    (Audit-2 H4 residue). FIXED: same rules appended at creation.
+R5  [MED] missing_roles CHECK COULD NOT SEE THE RUNAWAY IT EXISTS FOR: forge
+    and spark share output/code and the check was folder-nonempty, so a
+    FORGE-only outburst made spark look "present" (Audit-2 H4, unfixed since).
+    FIXED: detection now matches the _forgerole_/_sparkrole_ prefix in
+    filenames inside the shared folder.
+R6  [HIGH] M9 SIZE LIMITS WERE PROMPT TEXT ONLY (spec 500 lines / 25KB /
+    5 imports; SAFEGUARDS #16 claimed as GLITCH validation - never existed).
+    FIXED: file_too_big() gate runs in BOTH lanes BEFORE validation and BEFORE
+    disk write; oversize fragments are re-queued with a split correction
+    through the existing retry machinery; final attempt written with note.
+    Unit: 600-line reject, 100-line pass, 7-import .py reject, 6-include .cpp
+    reject, small .md pass.
+
+    M8 (unique splitting / facade registry): deliberately NOT implemented as
+    machinery. The spec's split protocol expects multi-file worker output;
+    the system delivers exactly one file per task attempt, so a facade
+    registry would be scaffolding shaped like a feature - this repo's
+    recurring failure mode. The enforcement path that actually exists is:
+    M9 gate rejects oversize + instructs a split; AURA can plan the split as
+    separate sibling tasks (dedup allows distinct titles). Documented here so
+    no one builds the fake version later.
+--------------------------------------------------------------------------------
+7.3 — VERIFICATION (run, not logged)
+--------------------------------------------------------------------------------
+V1  py_compile: studio.py, gui.py, smoke_check.py - pass.
+V2  PREFLIGHT UNIT: stub tag server with only gemma3:12b -> MISSING audio
+    reported, pixel not; qwen3:14b missing reported.
+V3  M9 UNIT: 4 positive + 2 negative cases pass (see R6).
+V4  E2E NORMAL vs mock: parallel batches execute; "Parallel validated +
+    wrote" lines show write-after-validate; 6 tasks done attempts=1 each;
+    real build (marker string), smoke ALL PASS, stable IDLE, state.json
+    persisted.
+V5  FAIL-STRESS vs always-FAIL validator: all 6 tasks bounded at 3 attempts,
+    all done; files per role = 1 (was 3 before R1); no unbounded loop.
+V6  RESUME TEST: seeded pending queue + matching state.json -> workers
+    dispatched before ANY planner call; queue drained, build completed, then
+    planning resumed for missing roles. The REPLAN-on-every-boot behavior is
+    gone.
+--------------------------------------------------------------------------------
+7.4 — STILL OPEN (unchanged honesty list)
+--------------------------------------------------------------------------------
+- M8 as spec'd machinery: not built, on purpose (see 7.2 R6 note).
+- FORGE queued first => effectively sequential (VRAM physics, 14GB/15GB).
+- smoke_check has no toolchain syntax checks for non-Python; fence/<think>/
+  non-trivial guards cover the recurring failure classes.
+- GUI parallel label is an estimate, not a live executor readout.
+- PAUSE granularity: still checked at loop top (up to one long LLM call late).
+Everything from 6.4 not restated here still applies; nothing was hidden.
+================================================================================

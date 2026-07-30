@@ -278,17 +278,15 @@ class AiTeamGUIv2:
             txt = ""
             if gdd_path.exists():
                 txt = gdd_path.read_text(encoding="utf-8")
-            lower = txt.lower()
-            # Detect
-            engine = self.combo_engine.get() if hasattr(self, 'combo_engine') else "Custom"
-            lang = self.combo_lang.get() if hasattr(self, 'combo_lang') else "Python"
-            gtype = self.combo_type.get() if hasattr(self, 'combo_type') else "3D"
-            # From GDD if exists
-            if "language:" in lower:
-                for line in txt.splitlines():
-                    if "language:" in line.lower():
-                        lang = line.split(":",1)[1].strip()[:30]
-                        break
+            # R3: show what the ORCHESTRATOR detects (studio detectors via
+            # detect_from_gdd), not the combo-box defaults. The bar previously
+            # disagreed with studio.py on the same GDD - audit M4/M5 class.
+            try:
+                engine, lang, gtype, _ = detect_from_gdd()
+            except Exception:
+                engine = self.combo_engine.get()
+                lang = self.combo_lang.get()
+                gtype = self.combo_type.get()
 
             self.gdd_label.config(text=f"{gdd_path.name} | Engine: {engine} | Lang: {lang} | Type: {gtype} | {len(txt)} chars | Tasks: {self.count_tasks()}")
 
