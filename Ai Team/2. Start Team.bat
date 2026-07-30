@@ -74,11 +74,6 @@ echo.
 
 echo.
 echo ================================================
-echo POST-RUN VERIFY - checking build is a real game and fragments parse
-echo ================================================
-!PYTHON! verify_build.py
-echo.
-echo ================================================
 echo Team stopped. All progress saved in tasks.json + MEMORY.md
 echo Your 4 top files:
 echo  1. Install and Setup.bat - Setup

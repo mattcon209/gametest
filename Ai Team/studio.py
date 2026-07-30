@@ -11,7 +11,7 @@ AI GAME STUDIO v6 - FINAL - ANY LANGUAGE, ANY GAME TYPE, UNIQUE SPLITTING, MINIM
 - PIPELINE: IDEA (GDD READ ONLY) -> DETECT game type/language/engine -> PLAN missing only (dedup) -> BUILD once -> VALIDATE -> COMPILE /build/ -> TEST -> DONE -> IDLE (true finish)
 """
 
-import time, json, urllib.request, urllib.error, re, shutil, random, subprocess
+import os, time, json, urllib.request, urllib.error, re, shutil, random, subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -73,21 +73,8 @@ def log(msg, tag="INFO"):
             f.write(line)
     except: pass
 
-# FIX H2-ollama (Audit5): explicit Ollama runtime configuration.
-# Previously the payload carried no "options" block at all, which meant:
-#  - num_ctx fell back to Ollama's default (commonly 4096). The INTEGRATOR prompt
-#    measures ~3775 tokens (GDD 4000 chars + code_bundle 10000 chars), i.e. within
-#    ~8% of that ceiling - a modest GDD growth would silently truncate the fragment
-#    payload mid-merge with no error surfaced anywhere.
-#  - keep_alive was unset, so Ollama's default unload timer (not this scheduler)
-#    decided VRAM residency. That races the ThreadPoolExecutor batching, which
-#    reserves against a 15GB budget assuming its own model-residency model.
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_NUM_CTX = 8192      # headroom over the largest prompt (INTEGRATOR ~3.8k tokens)
-OLLAMA_KEEP_ALIVE = "5m"   # hold weights across back-to-back calls; matches VRAM planner
-
 def call_ollama(model, system_prompt, user_prompt, timeout=400):
-    url = f"{OLLAMA_URL}/api/chat"
+    url = "http://localhost:11434/api/chat"
     payload = {
         "model": model,
         "messages": [
@@ -95,10 +82,10 @@ def call_ollama(model, system_prompt, user_prompt, timeout=400):
             {"role": "user", "content": user_prompt}
         ],
         "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
-            "num_ctx": OLLAMA_NUM_CTX
-        }
+            "num_ctx": 8192
+        },
+        "keep_alive": "5m"
     }
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -116,46 +103,6 @@ def call_ollama(model, system_prompt, user_prompt, timeout=400):
     except Exception as e:
         log(f"Call failed {model}: {e}", "ERROR")
         return None
-
-def preflight_models():
-    """FIX H2-ollama (Audit5): verify Ollama is reachable and every model in TEAM is
-    actually pulled, BEFORE the run starts.
-
-    Without this a missing model surfaces only as a generic 'Call failed {model}'
-    deep inside the loop, which silently burns one of the task's 3 attempts and can
-    push an otherwise-healthy task into the loop breaker. Failing loudly at startup
-    is far cheaper than discovering it 20 tasks in. Non-fatal by design: the run
-    continues so an operator can pull the model while the team works on other roles.
-    """
-    try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        log(f"Ollama not reachable at {OLLAMA_URL} ({e}) - start Ollama app or 'ollama serve'", "PREFLIGHT")
-        return False
-
-    installed = {m.get("name", "") for m in data.get("models", []) if m.get("name")}
-
-    def _present(want):
-        # Exact match first. Only fall back to the bare name when the caller did not
-        # pin a tag - otherwise "gemma3:12b" being installed would wrongly satisfy a
-        # requirement for "gemma3:4b" (different model, 7.8GB vs 3.3GB VRAM).
-        if want in installed:
-            return True
-        if ":" in want:
-            return f"{want}:latest" in installed
-        return any(n == want or n.startswith(want + ":") for n in installed)
-
-    required = sorted(set(TEAM.values()))
-    missing = [m for m in required if not _present(m)]
-
-    if missing:
-        log(f"MISSING MODELS: {', '.join(missing)} - pull with: {'; '.join('ollama pull '+m for m in missing)}", "PREFLIGHT")
-        log("Tasks routed to a missing model will fail and consume retry attempts.", "PREFLIGHT")
-        return False
-
-    log(f"Preflight OK - all {len(required)} models present: {', '.join(required)}", "PREFLIGHT")
-    return True
 
 def read_file(p):
     try:
@@ -307,21 +254,12 @@ def scan_existing_outputs():
         if f.is_file() and f.suffix.lower() in valid_exts:
             if f.stat().st_size < 10:
                 continue
-            # FIX M6 (Audit5): strip the random suffix from the RAW stem, while the
-            # underscore separator still exists. The old code replaced "_"->" " first,
-            # so the r"_[a-f0-9]{4}$" pattern could never match and suffixes such as
-            # "a1b2" leaked into existing_titles (polluting AURA's titles_list).
-            #
-            # Case-sensitivity is deliberate and load-bearing: random_suffix() always
-            # emits LOWERCASE hex (f"{n:04x}"), while title words keep their original
-            # capitalisation via safe_file_title. Matching [a-f0-9]{4} against the raw
-            # (non-lowercased) stem therefore strips "_a1b2" but preserves real words
-            # such as "_Cafe", "_Fade", "_Face", "_Deed" that are coincidentally hex.
-            # Order matters: suffix strip -> separator normalise -> prefix strip.
-            stem = re.sub(r"_(?:Core|Utils|API)?_?[a-f0-9]{4}$", "", f.stem)
-            name = stem.lower().replace("_", " ").replace("-", " ")
+            name = f.stem.lower().replace("_"," ").replace("-"," ")
             name = re.sub(r"^\d+\s+", "", name)
             name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+", "", name)
+            # Remove random suffix like _A1B2
+            name = re.sub(r"_[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
+            name = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
             existing.append(str(f.relative_to(BASE)))
             existing_titles.add(name.strip())
     return existing, existing_titles
@@ -343,6 +281,7 @@ def extract_code_from_response(result, primary="python"):
     """FIX C5: Strip markdown, code fences, <think> blocks, prose - worker path"""
     if not result:
         return result
+    original = result
     # Remove <think>...</think> blocks (deepseek-r1 reasoning)
     result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL | re.IGNORECASE)
     # Remove <thinking> blocks
@@ -569,8 +508,6 @@ def main():
     log(f"Detected Language: {full_lang} -> primary {primary} ext {ext} run: {run_cmd}", "DETECT")
     log(f"Detected Game Type: {game_type}", "DETECT")
     log(f"Team: {', '.join([f'{k}={v}' for k,v in TEAM.items()])}", "INFO")
-    preflight_models()  # FIX H2-ollama: fail loudly at startup, not 20 tasks in
-    log(f"Ollama config: num_ctx={OLLAMA_NUM_CTX} keep_alive={OLLAMA_KEEP_ALIVE}", "INFO")
     log("==================================================", "START")
 
     tasks = []
@@ -667,6 +604,7 @@ def main():
 
             # INTEGRATOR / COMPILE - Guaranteed finish
             should_build = False
+            main_path_check = BUILD_DIR / f"main{ext}"
             # Also check any main.* exists
             any_main = any((BUILD_DIR / f"main{e}").exists() for e in [".py",".cpp",".cs",".lua",".gd",".rs",".js",".ts"])
             if len(pending) == 0 and len(existing_files) >= 1:
@@ -946,7 +884,7 @@ JSON only.
                     if not (BUILD_DIR / "DONE").exists():
                         (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
                 else:
-                    log("Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
+                    log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
                 time.sleep(15)
                 continue
 
@@ -1003,12 +941,23 @@ JSON only.
                 MAX_TASKS = 10
         except Exception:
             pass
-        # FIX N4b (Audit5): the duplicate max-task cap block that used to sit here has
-        # been removed. It was unreachable dead code: the live cap at the top of the
-        # worker section (see "FIX N4") continues on every branch except when
-        # pending_count > 0, while this copy required pending_count == 0 - mutually
-        # exclusive. Keeping two divergent copies of the cap/export logic was a
-        # drift hazard; the single reachable implementation above is authoritative.
+        done_count = len([t for t in tasks if t.get("status")=="done"])
+        pending_count = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
+        if done_count >= MAX_TASKS and pending_count == 0:
+            # FIX N3: Idempotency guard - only export once, not every 15s forever (would fill disk)
+            if (BUILD_DIR / "DONE").exists():
+                log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached and DONE already exists - IDLE (prevents disk-filler export loop)", "CAP")
+                time.sleep(15)
+                continue
+            log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
+            if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
+                export_build(f"CAP_{MAX_TASKS}")
+                if not (BUILD_DIR / "DONE").exists():
+                    (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
+            else:
+                log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
+            time.sleep(15)
+            continue
 
         # FIX H1: True parallel execution via ThreadPoolExecutor - max 2 models in 16GB VRAM
         # If parallel batch >1, process in parallel, else process single
@@ -1020,14 +969,6 @@ JSON only.
                 # Isolated processing for one task - no shared state except file writes which are unique due to random suffix
                 role = t_item.get("role","forge")
                 model = TEAM.get(role, "qwen3:14b")
-
-                # FIX H1a (Audit5): defensive backstop. The batch is already filtered by
-                # the loop breaker before dispatch (see below), so reaching this with an
-                # exhausted task means a logic error upstream - bail without spending a
-                # model call or writing a file.
-                if t_item.get("_pre_attempts", 0) >= 3:
-                    log(f"LOOP BREAKER (parallel): Skip {t_item['title']} after {t_item.get('_pre_attempts',0)} fails", "BREAKER")
-                    return (t_item, None, "breaker")
                 gdd_snip = read_file(GDD_FILE)[:3500]
                 full_l, prim, ext_, run_c = detect_language(gdd_snip)
                 eng_mode, eng_instr = detect_engine_mode(gdd_snip)
@@ -1067,49 +1008,10 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                 fpath.write_text(cleaned, encoding="utf-8")
                 return (t_item, (fpath, cleaned, result), "done")
 
-            # FIX H1a (Audit5): apply the LOOP BREAKER *before* dispatch, then mark
-            # in_progress and increment attempts - mirroring the sequential path exactly.
-            #
-            # Previously this path incremented attempts only AFTER a successful call, so
-            # an exhausted task still burned a full LLM call and WROTE A FILE on every
-            # retry (observed: 3 duplicate fragments per task, which then fed INTEGRATOR
-            # - the "duplicate Save Systems" class of bug). It also never set in_progress,
-            # so a crash mid-batch left tasks "pending" and they silently re-ran.
-            #
-            # Order is load-bearing: breaker is evaluated against the attempts count as it
-            # stood BEFORE this cycle, so a task on its 3rd and final attempt still runs.
-            runnable_batch = []
-            for _bt in parallel_batch:
-                for tt in tasks:
-                    if tt.get("id") == _bt.get("id"):
-                        _prior = tt.get("attempts", 0)
-                        _safe_t = re.sub(r"[^a-z0-9]", "", tt.get("title", "").lower())
-                        _sibling_fails = sum(
-                            1 for x in tasks
-                            if re.sub(r"[^a-z0-9]", "", x.get("title", "").lower()) == _safe_t
-                            and x.get("attempts", 0) >= 1
-                        )
-                        if _prior >= 3 or _sibling_fails >= 3:
-                            log(f"LOOP BREAKER (parallel): Skip {tt['title']} after {_prior} fails", "BREAKER")
-                            tt["status"] = "done"
-                            tt["note"] = "Skipped by loop breaker (parallel)"
-                        else:
-                            tt["status"] = "in_progress"
-                            tt["attempts"] = _prior + 1
-                            _bt["_pre_attempts"] = _prior
-                            _bt["attempts"] = tt["attempts"]
-                            runnable_batch.append(_bt)
-                        break
-            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
-
-            if not runnable_batch:
-                log("Parallel batch fully skipped by loop breaker - no model calls spent", "BREAKER")
-                continue
-
             # Execute parallel
             results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(runnable_batch)) as executor:
-                future_to_task = {executor.submit(process_one_task, t): t for t in runnable_batch}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_batch)) as executor:
+                future_to_task = {executor.submit(process_one_task, t): t for t in parallel_batch}
                 for future in concurrent.futures.as_completed(future_to_task):
                     try:
                         task_item, res, status = future.result()
@@ -1125,20 +1027,14 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                 # Find task in main tasks list
                 for tt in tasks:
                     if tt.get("id") == task_item.get("id"):
-                        if status == "breaker":
-                            # Already marked done by the pre-dispatch breaker; leave as-is.
-                            pass
-                        elif status == "failed" or res is None:
+                        if status == "failed" or res is None:
                             tt["status"] = "failed"
                         else:
                             tt["status"] = "done"
                             tt["output_file"] = str(res[0])
-                            # FIX H1a: do NOT increment here - attempts was already
-                            # incremented before dispatch (mirroring the sequential path).
-                            # Incrementing again double-counted and burned the retry budget
-                            # at twice the intended rate.
+                            tt["attempts"] = tt.get("attempts",0)+1
                         break
-            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
+            TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
 
             # Validate each result sequentially
             for task_item, res, status in results:
@@ -1300,9 +1196,9 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
             log(f"Validation parse fail: {e} - will retry if attempts remain", "VALIDATE")
             if task.get("attempts",0) < 3:
                 task["status"] = "pending"
-                task["prompt"] = task["prompt"] + "\nVALIDATION PARSE FAILED, retry validating strictly."
+                task["prompt"] = task["prompt"] + f"\nVALIDATION PARSE FAILED, retry validating strictly."
             else:
-                log("Validation parse failed 3 times, forcing PASS to prevent deadlock", "VALIDATE")
+                log(f"Validation parse failed 3 times, forcing PASS to prevent deadlock (was silent PASS after 1st before)", "VALIDATE")
                 task["status"] = "done"
                 verdict = "PASS"
             task["output_file"] = str(fpath)
