@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+builds/
+output_backup_*
+save_file.json
+PAUSE
+
