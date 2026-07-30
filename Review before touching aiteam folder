@@ -6,6 +6,14 @@ Method: read every file, trace against Audits 1–5 + spec docs, then PROVE ever
 claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 ================================================================================
 
+>>> CURRENT STATE: HEAD 470cf20. Parts 0–5 below are the v6.7 fix-round report
+>>> (written at 537af98). PART 6 is a later INDEPENDENT audit that re-verified
+>>> every claim in Parts 0–5 by execution, found 1 regression + 1 gap, and fixed
+>>> both. If Parts 0–5 and Part 6 disagree, Part 6 is newer and was re-tested.
+>>> Read 6.2 (what was wrong), 6.4 (still open) and 6.5 (standing advice)
+>>> before changing anything.
+================================================================================
+
 --------------------------------------------------------------------------------
 PART 0 — HOUSEKEEPING DONE FIRST (per instruction)
 --------------------------------------------------------------------------------
@@ -254,4 +262,185 @@ verified working end-to-end by execution: plan → (real) parallel build →
 validate → integrate → real game in build/ → DONE → stable IDLE, with every
 safety bound proven under stress. As always on this codebase: trust the
 verification in Part 3, not this sentence.
+================================================================================
+
+
+================================================================================
+================================================================================
+PART 6 — INDEPENDENT AUDIT #6 + REPAIR (added at HEAD 470cf20)
+Auditor: Arena agent (author of Audits 1–5)
+Audited: 537af98 · Repaired and pushed: 470cf20 · Same day
+Method: fresh clone, then PROVE every claim in Parts 0–5 by execution —
+mock-Ollama end-to-end runs (Python AND C++ projects), a breaker stress test
+with an always-FAIL validator, unit assertions on detection/dedup, and
+negative-control tests on the verifier itself. Nothing below is taken on trust
+from a commit message, a code comment, or Parts 0–5.
+================================================================================
+
+--------------------------------------------------------------------------------
+6.0 — WHY THIS SECTION EXISTS
+--------------------------------------------------------------------------------
+Across Audits 1–5 the recurring failure on this codebase was never "nobody
+fixed it" — it was "the fix was written to the shape or the literal text of the
+finding, and the log/commit said it worked." Examples on record:
+  · v6.1 read system_requirements.json, logged about it, never used it.
+  · v6.2 lowered two of the three gates that controlled the same behaviour.
+  · v6.5 claimed an L2 .bat fix in the message with no .bat in the diff.
+So Parts 0–5 were treated as CLAIMS to be tested, not as a changelog. Most of
+them turned out to be true. Two did not survive contact with a test.
+
+--------------------------------------------------------------------------------
+6.1 — VERIFICATION OF PARTS 0–5 (what I could confirm by running it)
+--------------------------------------------------------------------------------
+CONFIRMED TRUE — these are real and I reproduced them:
+
+F1  Import fixed. py_compile passes on studio.py, gui.py, smoke_check.py.
+F2  Parallel breaker loop is genuinely bounded. STRESS TEST: validator wired to
+    return FAIL for every task. Result: all 6 roles ended status=done with
+    attempts=3 exactly, zero tasks stuck in "failed", max 3 files per role
+    folder, system settled into stable IDLE. This is the scenario the old
+    skipped_breaker→failed code looped on forever. Fix is real.
+F3  No double attempt-counting. Confirmed by object-identity trace: pending is
+    built by list comprehension over tasks, so parallel_batch holds the SAME
+    dict objects — the pre-call increment persists, and the results loop no
+    longer re-increments. Every task in a clean run ended attempts=1.
+F4  Exactly 1 occurrence of `if done_count >= MAX_TASKS`. Dead block is gone
+    (claimed in three prior commits, actually done here).
+F5  LANGUAGE MATRIX 11/11 PASS. The \bc\+\+\b diagnosis was correct — a word
+    boundary after '+' cannot exist, so C++/C# fell through to Python. Now:
+    C++→.cpp, C#→.cs, C#+Lua→.cs, Python+C++→.py, Lua, GDScript, Rust, TS, JS,
+    Python, C+++Lua all correct.
+F6  Shipped 5. GDD.md (no LANGUAGE field) now infers gdscript from the engine
+    line and says so loudly. Before: silent Python. Confirmed live.
+F7  Suffix strip is correct AND word-safe. Real files on disk through the real
+    scan_existing_outputs(): Save_System_a1b2→'save system',
+    Boss_Beef_Cafe→'boss beef cafe', Umbra_Fade_b9e1→'umbra fade',
+    Human_Face_Shader / Ancient_Deed / Data_Feed_c3d4 all correct.
+F8  titles_similar implemented and behaves: 5/5 cases — true repeat caught;
+    'Save System Cloud Sync', 'Autosave System', 'System' no longer over-blocked.
+F9  strip_thinking() present; .md fallback uses stripped text. End-to-end run
+    with a mock that emits <think> on every worker call: zero leaks anywhere
+    under output/.
+F10 memory_summary[-2500:] — planner sees the MOST RECENT memory. Confirmed.
+F11 One extraction implementation. The integrator's third copy is gone.
+F12 repo_backup/ reference removed (0 occurrences).
+F13 Preflight exists; per-role TEMP_BY_MODEL wired into the payload.
+F14 gui.py BASE resolve()'d, Restore Output Backup present, language→extension
+    map fixed for non-Python.
+14  GDD READ-ONLY INVARIANT HOLDS — 6th consecutive revision. Zero
+    write/append/unlink against GDD_FILE in studio.py or gui.py. The only
+    GDD operations are shutil.copy FROM it (snapshot_gdd, export_build).
+15  Post-build smoke hook fires and is exception-guarded.
+22  build/ and output/ being gitignored is SAFE — studio.py mkdirs both plus
+    all five role subfolders at startup, so a fresh clone self-heals.
+
+ALSO CHECKED (not claimed in Parts 0–5, no problem found):
+  · snapshot_gdd is bounded — gated behind an actual mtime change, so it
+    cannot spam gdd_history/ while idling.
+  · Ollama payload carries num_ctx 8192 + keep_alive 5m + per-role temperature
+    on EVERY request (asserted inside the mock server, not just grepped).
+  · Parallel batching still executes real concurrent work via ThreadPoolExecutor.
+
+--------------------------------------------------------------------------------
+6.2 — WHAT I FOUND WRONG (2 items, both now fixed in 470cf20)
+--------------------------------------------------------------------------------
+
+A1  [REGRESSION — HIGH] preflight_models() stopped matching model tags exactly.
+    studio.py had reverted to:
+        p.startswith(base.split(":")[0] + ":")
+    which means ANY gemma3:* satisfies a requirement for gemma3:4b.
+    PROVEN: with gemma3:12b pulled and gemma3:4b absent, preflight printed
+    "PREFLIGHT: all 8 role models present in Ollama". Those are different
+    models (3.3GB vs 7.8GB VRAM) — AUDIO would then fail at dispatch as a
+    generic "Call failed", silently burning one of its 3 attempts, which is
+    the precise failure the preflight was added to prevent.
+    This exact bug was fixed once before (dd66ece) and came back, so the fix
+    now carries a comment explaining WHY the matching is tag-exact.
+    FIXED: exact tag match (plus :latest tolerance); prefix logic only when the
+    requirement itself is untagged.
+    VERIFIED: now reports  MISSING [audio] -> run: ollama pull gemma3:4b
+
+A2  [GAP — HIGH] tools/smoke_check.py validated NOTHING on non-Python projects.
+    Every check was .py-only: py_compile over output/code/*.py, plus
+    build/main.py. On a C++/Lua/GDScript/Rust build it inspected ZERO files and
+    still printed "SMOKE RESULT: ALL PASS".
+    PROVEN on a full C++ end-to-end run: output was
+        PASS output/code fragments compile: 0/0 OK
+        SMOKE RESULT: ALL PASS
+    …with two .cpp fragments and a build/main.cpp that were never examined. A
+    broken non-Python build was indistinguishable from a good one — and this
+    tool is the project's regression gate, auto-invoked after every build.
+    FIXED with toolchain-free checks (no compilers assumed) targeting the two
+    regressions that actually recur here — C5 (markdown fences leaking into
+    source) and F9 (<think> blocks leaking into source):
+      · non-Python fragments in output/code must contain no ``` and no <think>
+      · the build entry point (any language) must contain no ``` and no <think>
+      · the build entry point must be non-trivial (>= 10 chars)
+    VERIFIED positive: the C++ run now performs 3 real checks (was 0).
+    VERIFIED negative (control): injecting a fenced .cpp fragment and a
+    <think>-polluted main.cpp produces 2 FAILUREs and exit code 1.
+
+CLEANUP (same commit): removed dead locals 'original' and 'main_path_check',
+unused filedialog import and vram_map in gui.py, two unused exception bindings,
+and three placeholder-free f-strings. pyflakes across studio.py + gui.py +
+tools/smoke_check.py: 0 issues.
+
+--------------------------------------------------------------------------------
+6.3 — FULL REGRESSION RUN AT 470cf20 (all green)
+--------------------------------------------------------------------------------
+Python project, fresh GDD, mock Ollama asserting payload contents:
+  PREFLIGHT: all 8 role models present
+  num_ctx=8192 + keep_alive=5m + per-role temperature on every request
+  AURA planned → diversity forced missing roles → parallel batches executed
+  fragments: 2/2 compile · zero <think> leaks · zero fence leaks
+  build/main.py = real LLM output (NOT the "Fallback Build" placeholder)
+  post-build SMOKE: all-pass · DONE written · stable IDLE
+
+C++ project, same harness:
+  correct .cpp extensions on fragments · build/main.cpp produced
+  3 language-agnostic smoke checks now run and pass
+
+Breaker stress (always-FAIL validator):
+  6 tasks · max attempts exactly 3 · 0 stuck failed · <=3 files/role · IDLE
+
+--------------------------------------------------------------------------------
+6.4 — STILL OPEN (honest list, nothing hidden)
+--------------------------------------------------------------------------------
+· M8 — unique-splitting / facade registry: still 0 occurrences of split_into or
+  facade logic. Claimed in SAFEGUARDS #12/#15, SPEC §2/§8 and README fix #1;
+  the random suffix exists, the split/facade machinery does not.
+· M9 — file-size enforcement (500 lines / 25KB / import count): exists only as
+  text inside prompts. No code gate anywhere.
+· Startup replan drops the pending queue (Part 4 states this correctly). Worth
+  restating plainly: after a crash the system RE-PLANS, it does not resume.
+  Output-scan dedup prevents duplicate work, but "crash recovery" in the docs
+  implies more than what happens.
+· Parallel breaker still writes up to 3 fragments for a repeatedly-failing task
+  (file is written before validation sees it). Bounded and matching the
+  sequential lane's behaviour — acceptable, but it is output pollution.
+· max-parallel is effectively 1 whenever FORGE is queued first: devstral:24b is
+  ~14GB against a 15GB budget, so nothing can pair with it. Physics, not a bug,
+  but the README's "max 2 parallel" is optimistic for FORGE-heavy cycles.
+· smoke_check compiles .py only. Other languages get fence/<think>/non-trivial
+  checks but no syntax validation (no toolchains assumed on the target machine).
+· GUI "Parallel: Running" is still an estimate from pending>1, not a live
+  readout of the executor.
+
+--------------------------------------------------------------------------------
+6.5 — STANDING ADVICE FOR THE NEXT PERSON OR AGENT
+--------------------------------------------------------------------------------
+1. Run  python tools/smoke_check.py  after ANY change to studio.py. It is the
+   cheapest possible guard and it now covers every language. Two of the three
+   longest-lived bugs in this project's history (C5 across 3 audits, N1 across
+   2) would each have been caught by it instantly.
+2. Do not trust a log line, a code comment, or a commit message as evidence
+   that something works on this codebase. The historical failure rate of those
+   three signals is high enough that they are actively misleading. Run it.
+3. When fixing a gated behaviour, grep for EVERY gate controlling that
+   behaviour before editing. N1 took three rounds because three different
+   length gates governed one outcome and each round fixed a different one.
+4. Preflight matching is tag-exact ON PURPOSE (see A1). Do not "simplify" it.
+5. Keep commit messages to what is actually in the diff. Several past messages
+   listed a dozen fixes for a four-hunk change, which is why every claim in
+   this file now has a test behind it instead of a sentence.
 ================================================================================
