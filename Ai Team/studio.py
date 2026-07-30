@@ -254,9 +254,8 @@ def scan_existing_outputs():
             name = re.sub(r"^\d+\s+", "", name)
             name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+", "", name)
             # Remove random suffix like _A1B2
-            name = re.sub(r"_[a-f0-9]{4}$", "", name)
-            name = re.sub(r"\s+core_[a-f0-9]{4}$", "", name)
-            name = re.sub(r"\s+utils_[a-f0-9]{4}$", "", name)
+            name = re.sub(r"_[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
+            name = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", name, flags=re.IGNORECASE)
             existing.append(str(f.relative_to(BASE)))
             existing_titles.add(name.strip())
     return existing, existing_titles
