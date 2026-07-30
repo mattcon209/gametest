@@ -111,79 +111,101 @@ def refresh_gdd_path():
     GDD_FILE = get_gdd_path()
     return GDD_FILE
 
-# === NEW v6: Language Detection ===
+# === v6.1 FIXED: Language Detection - Word boundaries + explicit field first ===
 def detect_language(gdd_text):
-    lower = gdd_text.lower()
-    # Look for LANGUAGE: line
-    lang = "Python"  # default
+    # First, look for explicit LANGUAGE field with word boundaries
+    lang = "Python"
     for line in gdd_text.splitlines():
-        if "language:" in line.lower():
-            # Take after colon
+        if re.match(r"^\s*LANGUAGE\s*:", line, re.IGNORECASE):
             parts = line.split(":",1)
-            if len(parts)>1:
-                candidate = parts[1].strip()
-                # Clean up - take first language if multiple
-                # e.g., "C++ + Lua" -> primary C++
-                # e.g., "Python + C++" -> Python primary
-                # Keep full string for info but primary is first
-                if candidate:
-                    lang = candidate[:50]  # limit
-                    break
-    # Normalize primary language for extension mapping
+            if len(parts)>1 and parts[1].strip():
+                lang = parts[1].strip()[:50]
+                break
+    
     lower_lang = lang.lower()
+    # Use word boundaries to avoid substring collisions (M2 fix)
+    # e.g., "js" should not match inside "objects", "ts" should not match "assets"
     primary = "python"
     ext = ".py"
     run_cmd = "python main.py"
-    if "c++" in lower_lang or "cpp" in lower_lang:
+
+    # Check in order of specificity, using regex \b for word boundaries where needed
+    # C++ must be checked before C# etc.
+    if re.search(r"\bc\+\+|\bcpp\b", lower_lang):
         primary = "cpp"
         ext = ".cpp"
         run_cmd = "g++ main.cpp -o game && game.exe"
-    elif "c#" in lower_lang or "csharp" in lower_lang:
+    elif re.search(r"\bc#\b|^\s*c#|csharp", lower_lang):
         primary = "csharp"
         ext = ".cs"
         run_cmd = "dotnet run"
-    elif "lua" in lower_lang:
+    elif re.search(r"\blua\b", lower_lang):
         primary = "lua"
         ext = ".lua"
         run_cmd = "lua main.lua"
-    elif "gdscript" in lower_lang or "godot" in lower_lang:
+    elif re.search(r"\bgdscript\b|godot", lower_lang):
         primary = "gdscript"
         ext = ".gd"
         run_cmd = "godot --path . main.tscn"
-    elif "rust" in lower_lang:
+    elif re.search(r"\brust\b", lower_lang):
         primary = "rust"
         ext = ".rs"
         run_cmd = "cargo run"
-    elif "javascript" in lower_lang or "js" in lower_lang and "typescript" not in lower_lang:
-        primary = "javascript"
-        ext = ".js"
-        run_cmd = "node main.js"
-    elif "typescript" in lower_lang or "ts" in lower_lang:
+    elif re.search(r"\btypescript\b|\bts\b", lower_lang):
+        # Check TypeScript before JavaScript to avoid ts collision
         primary = "typescript"
         ext = ".ts"
         run_cmd = "npx ts-node main.ts"
-    elif "python" in lower_lang:
+    elif re.search(r"\bjavascript\b|\bjs\b", lower_lang):
+        primary = "javascript"
+        ext = ".js"
+        run_cmd = "node main.js"
+    elif re.search(r"\bpython\b", lower_lang):
         primary = "python"
         ext = ".py"
         run_cmd = "python main.py"
     
-    # Full language string for info (may contain +)
     full_lang = lang
     return full_lang, primary, ext, run_cmd
 
-# === NEW v6: Game Type Detection ===
+# === v6.1 FIXED: Game Type Detection - Explicit field first, word boundaries ===
 def detect_game_type(gdd_text):
+    # First check explicit GAME TYPE field if present
+    for line in gdd_text.splitlines():
+        if re.match(r"^\s*GENRE\s*:", line, re.IGNORECASE) or re.match(r"^\s*GAME TYPE\s*:", line, re.IGNORECASE):
+            lower_line = line.lower()
+            # Explicit 2D/3D mentions in genre line
+            if re.search(r"\b3d\b", lower_line):
+                return "3D"
+            if re.search(r"\b2d\b", lower_line):
+                # Check for pixel qualifier
+                if "pixel" in lower_line:
+                    return "2D Pixel"
+                return "2D"
+            if "text" in lower_line:
+                return "Text"
+            if "gui" in lower_line:
+                return "GUI"
+
     lower = gdd_text.lower()
-    if any(k in lower for k in ["3d", "node3d", "tether", "ragdoll", "diving", "mesh", "model", "3d fishing", "global_transform"]):
-        return "3D"
-    elif any(k in lower for k in ["2d", "pixel", "sprite", "tilemap", "platformer", "2d fishing"]):
+    # Use word boundaries to avoid false positives on "model" substring (M1 fix)
+    # Old code: "model" matched any occurrence like "all models read this"
+    # New: check for explicit game type keywords with \b and prioritize genre line above
+    if re.search(r"\b3d\b", lower) or re.search(r"\bnode3d\b", lower) or re.search(r"\btether\b", lower) or re.search(r"\bragdoll\b", lower):
+        # But exclude if it's in a comment about models plural that is not game type - we already checked GENRE field first
+        # Require additional 3D indicator, not just "model" alone
+        if re.search(r"\b3d\b", lower) or "tether" in lower or "ragdoll" in lower or "diving" in lower:
+            return "3D"
+    if re.search(r"\b2d\b", lower) and "pixel" in lower:
+        return "2D Pixel"
+    if re.search(r"\b2d\b", lower):
         return "2D"
-    elif any(k in lower for k in ["text based", "text adventure", "parser", "text-based"]):
+    if re.search(r"\btext\s*based\b|\btext\s*adventure\b|\bparser\b", lower):
         return "Text"
-    elif any(k in lower for k in ["gui only", "gui puzzle", "clicker", "editor", "window", "button"]):
+    if re.search(r"\bgui\s*only\b|\bgui\s*puzzle\b|\bclicker\b.*\bgui\b", lower):
         return "GUI"
-    else:
-        return "2D"  # default
+
+    return "2D"  # default safe fallback
 
 def detect_engine_mode(gdd_text):
     lower = gdd_text.lower()
@@ -231,6 +253,64 @@ def save_memory(text):
     try:
         MEMORY_FILE.write_text(f"# STUDIO MEMORY v6 - {datetime.now()}\n\n{text}\n", encoding="utf-8")
     except: pass
+
+def extract_code_from_response(result, primary="python"):
+    """FIX C5: Strip markdown, code fences, <think> blocks, prose - worker path"""
+    if not result:
+        return result
+    original = result
+    # Remove <think>...</think> blocks (deepseek-r1 reasoning)
+    result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL | re.IGNORECASE)
+    # Remove <thinking> blocks
+    result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL | re.IGNORECASE)
+
+    # Try to extract fenced code block for primary language
+    # Look for ```python ... ``` or ```<primary> ... ```
+    # Case insensitive search for primary
+    lower_res = result.lower()
+    # Try primary-specific fence
+    for lang_tag in [primary.lower(), "python", "cpp", "c++", "c#", "csharp", "lua", "gdscript", "rust", "javascript", "js", "typescript", "ts"]:
+        fence = f"```{lang_tag}"
+        if fence in lower_res:
+            # Find in original case-insensitive but extract from original
+            idx = lower_res.find(fence)
+            if idx != -1:
+                after = result[idx+len(fence):]
+                # Skip possible newline after language tag
+                # Extract until closing ```
+                end_idx = after.find("```")
+                if end_idx != -1:
+                    code = after[:end_idx]
+                    # Strip first line if it's just language identifier left
+                    code = code.strip()
+                    # Remove leading/trailing extra markdown
+                    if len(code) > 50:
+                        return code.strip()
+
+    # Fallback: extract first generic code block ``` ... ```
+    if "```" in result:
+        parts = result.split("```")
+        # parts[1], parts[3], etc. are code blocks
+        for i in range(1, len(parts), 2):
+            code_candidate = parts[i]
+            # Remove first line if it's a language identifier
+            lines = code_candidate.splitlines()
+            if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","csharp","lua","gdscript","rust","javascript","js","typescript","ts","gd","csharp"]:
+                code_candidate = "\n".join(lines[1:])
+            code_candidate = code_candidate.strip()
+            if len(code_candidate) > 50:  # Minimal viable code length
+                return code_candidate
+
+    # If no fences, strip common prose prefixes like "Here's the save system:"
+    # Return original stripped of leading/trailing prose lines that are not code
+    # Keep result if it looks like code (contains def, class, import, :, {, }, etc.)
+    # Otherwise return original
+    stripped = original.strip()
+    # If original starts with prose and contains code block, we already extracted
+    # If still has markdown headers, remove lines starting with # for non-md files? Keep for .md roles
+    # For code roles, if result still contains "Here's" at start, try to find first code-like line
+    # Simple heuristic: find first line containing def, class, import, include, func, var, let, etc.
+    return stripped
 
 def random_suffix():
     return f"{random.randint(0, 0xFFFF):04x}"
@@ -419,8 +499,18 @@ def main():
     if TASKS_FILE.exists():
         try:
             tasks = json.loads(read_file(TASKS_FILE))
+            # FIX C4: Reset any in_progress tasks left from crash/Ctrl-C to pending to avoid deadlock
+            reset_count = 0
+            for t in tasks:
+                if t.get("status") == "in_progress":
+                    t["status"] = "pending"
+                    reset_count += 1
+            if reset_count > 0:
+                log(f"Reset {reset_count} in_progress tasks to pending (crash recovery) - fixes deadlock", "RECOVERY")
+                TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
             log(f"Loaded {len(tasks)} tasks", "MEMORY")
-        except:
+        except Exception as e:
+            log(f"Failed to load tasks.json: {e}, resetting", "ERROR")
             tasks = []
 
     memory_summary = read_file(MEMORY_FILE) or "No memory yet."
@@ -562,7 +652,7 @@ Requirements:
                                     log(f"Build {main_path.name} extracted (fallback)", "BUILD")
                                     break
                     
-                    ensure_build_runnable(primary, run_cmd, engine_mode, gdd_text)
+                    ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
 
                     # Test
                     log("Build created, running smoke test...", "TEST")
@@ -585,7 +675,7 @@ Requirements:
 
                 except Exception as e:
                     log(f"Build failed: {e}", "ERROR")
-                    ensure_build_runnable(primary, run_cmd, engine_mode, gdd_text)
+                    ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
                     time.sleep(5)
                     continue
 
@@ -746,15 +836,22 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
             TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
             continue
 
-        # Unique naming with random suffix to avoid overwrite - v6 fix for repeat naming
-        ext_to_use = ext_for_role(role, primary)
+        # Unique naming with random suffix to avoid overwrite - v6 fix for repeat naming - FIXED C1: pass ext not primary
+        # FIXED C5: Extract code from LLM prose before writing
+        ext_to_use = ext_for_role(role, ext)
         folder_to_use = folder_for_role(role)
         safe_file_title = "".join(c if c.isalnum() else "_" for c in task['title'])[:30]
         rand_suf = random_suffix()
         fname = f"{task.get('id',99):02d}_{role}_{safe_file_title}_{rand_suf}{ext_to_use}"
         fpath = OUTPUT_DIR / folder_to_use / fname
-        fpath.write_text(result, encoding="utf-8")
-        log(f"{role.upper()} DONE -> {fpath} ({len(result)} chars) [{full_lang}]", "DONE")
+        # FIX C5 + H7: Ensure parent dir exists and strip prose
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        cleaned_result = extract_code_from_response(result, primary)
+        # For lore/glitch/qa roles (.md), keep original if cleaning would remove too much? But still strip <think>
+        if ext_to_use == ".md" and len(cleaned_result) < 50:
+            cleaned_result = result  # Keep original for lore if extraction too aggressive, but <think> already stripped
+        fpath.write_text(cleaned_result, encoding="utf-8")
+        log(f"{role.upper()} DONE -> {fpath} ({len(cleaned_result)} chars, raw {len(result)} chars) [{full_lang}]", "DONE")
 
         # Validation
         log(f"AURA validating {role} work... Language {full_lang} Engine {engine_mode}", "VALIDATE")
@@ -773,6 +870,7 @@ Check: 1) role lane 2) engine respect 3) language respect ({full_lang}) 4) not h
 Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
 """
         validation = call_ollama(TEAM["aura"], SYSTEM.get("aura",""), validate_prompt, 200)
+        verdict = "PASS"  # FIX H8: Ensure verdict defined even if validation fails
         try:
             if validation:
                 raw = validation
@@ -798,12 +896,25 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
                 memory_summary += f"\n- Done: {task['title']} [{role}] {full_lang} -> {verdict}"
                 save_memory(memory_summary)
             else:
-                task["status"] = "done"
+                # No validation response at all - treat as failed, retry if attempts left, not silent PASS
+                log("Validation response empty - will retry if attempts remain", "VALIDATE")
+                if task["attempts"] < 3:
+                    task["status"] = "pending"
+                else:
+                    task["status"] = "done"
+                    task["note"] = "Validation empty, forced done after 3 attempts"
                 task["output_file"] = str(fpath)
                 TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
         except Exception as e:
-            log(f"Validation parse fail, PASS assumed: {e}", "VALIDATE")
-            task["status"] = "done"
+            # FIX H8: Don't silently PASS on first parse fail - retry if attempts remain
+            log(f"Validation parse fail: {e} - will retry if attempts remain", "VALIDATE")
+            if task.get("attempts",0) < 3:
+                task["status"] = "pending"
+                task["prompt"] = task["prompt"] + f"\nVALIDATION PARSE FAILED, retry validating strictly."
+            else:
+                log(f"Validation parse failed 3 times, forcing PASS to prevent deadlock (was silent PASS after 1st before)", "VALIDATE")
+                task["status"] = "done"
+                verdict = "PASS"
             task["output_file"] = str(fpath)
             TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
 

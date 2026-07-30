@@ -69,6 +69,12 @@ mkdir output\code 2>nul
 mkdir output\lore 2>nul
 mkdir output\art 2>nul
 mkdir output\qa 2>nul
+mkdir output\audio 2>nul
+mkdir build\engine 2>nul
+mkdir build\systems 2>nul
+mkdir build\assets 2>nul
+mkdir build\content 2>nul
+mkdir builds 2>nul
 mkdir roles 2>nul
 mkdir docs 2>nul
 mkdir tools 2>nul
@@ -126,6 +132,9 @@ ollama pull gemma3:12b
 echo   - Pulling deepseek-r1:14b (QA GLITCH) - 9.5GB...
 ollama pull deepseek-r1:14b
 
+echo   - Pulling gemma3:4b (Audio AUDIO) - 3.3GB...
+ollama pull gemma3:4b
+
 echo.
 echo [7/7] Verifying install...
 ollama list
@@ -140,7 +149,7 @@ echo ================================================
 echo  What was installed:
 echo   - Ollama (model switcher/manager)
 echo   - Python (if missing)
-echo   - 5 AI Models (50GB) in C:\Users\%USERNAME%\.ollama\models
+echo   - 6 AI Models (53GB) in C:\Users\%USERNAME%\.ollama\models
 echo.
 echo  Next steps:
 echo   1. Edit 5. GDD.md - Your prompt file - Describe your game
