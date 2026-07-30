@@ -74,6 +74,16 @@ echo.
 
 echo.
 echo ================================================
+echo POST-RUN SMOKE CHECK (audits 3/4 recommendation):
+echo ================================================
+if exist tools\smoke_check.py (
+    !PYTHON! tools\smoke_check.py
+) else (
+    echo smoke_check.py not found - skipping
+)
+
+echo.
+echo ================================================
 echo Team stopped. All progress saved in tasks.json + MEMORY.md
 echo Your 4 top files:
 echo  1. Install and Setup.bat - Setup

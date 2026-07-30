@@ -8,7 +8,7 @@ Minimal GUI v2 - Ai Team Control Panel - No Manual File Nonsense, No Direct GDD 
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import json
 import subprocess
 import threading
@@ -20,7 +20,7 @@ import shutil
 import random
 from datetime import datetime
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent  # resolve() so every path is absolute regardless of launch CWD
 GDD_CANDIDATES = [BASE / "5. GDD.md", BASE / "4. GDD.md", BASE / "GDD.md"]
 TASKS_FILE = BASE / "tasks.json"
 MEMORY_FILE = BASE / "MEMORY.md"
@@ -199,6 +199,7 @@ class AiTeamGUIv2:
             ("Resume Team", self.resume_team),
             ("Fresh Start (Backup output, clear tasks, keep GDD)", self.fresh_start),
             ("Force Rebuild (Delete build/DONE+main, keep output)", self.force_rebuild),
+            ("Restore Output Backup (undo Fresh Start)", self.restore_backup),
             ("Edit GDD (Pitch only, Engine/Lang via GUI)", self.edit_gdd),
             ("Open Build Folder", self.open_build),
             ("Open Output Folder", self.open_output),
@@ -484,7 +485,7 @@ CORE SYSTEMS FROM FEATURES:
                         "name": sys_name,
                         "description": line.strip(),
                         "needs": {
-                            "code": [f"{sys_name.lower().replace(' ','_')}_system.{full_lang.split('+')[0].strip().lower()[:2] if 'python' in full_lang.lower() else 'py'}"],
+                            "code": [f"{sys_name.lower().replace(' ','_')}_system.{ {'python':'py','c++':'cpp','c#':'cs','lua':'lua','gdscript':'gd','rust':'rs','javascript':'js','typescript':'ts'}.get(full_lang.split('+')[0].strip().lower(), 'py') }"],
                             "art": [f"{sys_name.lower().replace(' ','_')}_visual"],
                             "audio": [f"{sys_name.lower().replace(' ','_')}_sfx"],
                             "lore": [f"{sys_name.lower().replace(' ','_')}_dialogue"]
@@ -550,6 +551,35 @@ CORE SYSTEMS FROM FEATURES:
             self.refresh_all()
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+    def restore_backup(self):
+        # Fresh Start / New Project back up output/ but nothing could restore it.
+        # Pick a backup -> its contents are copied back over output/.
+        try:
+            backups = sorted([d for d in BASE.glob("output_backup_*") if d.is_dir()],
+                             key=lambda d: d.stat().st_mtime, reverse=True)
+            if not backups:
+                messagebox.showinfo("Restore", "No output_backup_* folders found")
+                return
+            names = "\n".join(f"{i+1}. {b.name}" for i, b in enumerate(backups[:10]))
+            pick = simpledialog.askstring("Restore Output Backup",
+                f"Enter number to restore (latest first):\n\n{names}\n\nExisting output/ will be moved aside first.")
+            if not pick or not pick.strip().isdigit():
+                return
+            idx = int(pick.strip()) - 1
+            if idx < 0 or idx >= len(backups[:10]):
+                messagebox.showerror("Restore", "Invalid number")
+                return
+            chosen = backups[idx]
+            # move current output aside rather than overwriting (never lose work)
+            if (BASE / "output").exists() and any((BASE / "output").rglob("*.*")):
+                aside = BASE / f"output_prerestore_{datetime.now().strftime('%Y%m%d_%H%M')}_{random.randint(0,0xFFFF):04x}"
+                shutil.copytree(BASE / "output", aside, dirs_exist_ok=True)
+            shutil.copytree(chosen, BASE / "output", dirs_exist_ok=True)
+            messagebox.showinfo("Restore", f"Restored {chosen.name} -> output/\n(Prior output/ copied aside, nothing deleted)")
+            self.refresh_all()
+        except Exception as e:
+            messagebox.showerror("Restore failed", str(e))
 
     def force_rebuild(self):
         try:

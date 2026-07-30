@@ -1,0 +1,257 @@
+================================================================================
+REVIEW BEFORE TOUCHING AITEAM FOLDER
+Full audit + fix + feature report — Ai Team v6.7
+Date: 2026-07-30 · Audited at HEAD d5d5e2b · Fixed and verified same day
+Method: read every file, trace against Audits 1–5 + spec docs, then PROVE every
+claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
+================================================================================
+
+--------------------------------------------------------------------------------
+PART 0 — HOUSEKEEPING DONE FIRST (per instruction)
+--------------------------------------------------------------------------------
+- Deleted root-level folders: art/, code/, lore/, qa/ — 121 files of stale
+  output from the old VIP-tether project, including the exact duplicate-title
+  mess the audits described (e.g. 4× "Save System", 3× "Daily Contract
+  Generator" across different IDs). These were OUTSIDE the aiteam folder.
+- "Ai Team/" folder and its contents were NOT deleted, renamed, or relocated.
+  Only repaired (details below).
+- This report file created at repo root, outside the aiteam folder.
+
+================================================================================
+PART 1 — WHAT I FOUND (audit of the aiteam folder at d5d5e2b)
+================================================================================
+
+HEADLINE: HEAD was dead on arrival. studio.py could not even be imported.
+Line 266 read:
+
+    def save_memorydef save_memory(text):
+
+…a botched edit from the 18:15 "Fix Audit5" commit (d5d5e2b), pushed 5 minutes
+before I cloned. Everything downstream (studio.py AND gui.py, which imports
+studio for export_build + detectors) was broken. The system that passed Audit 5
+at ad28b75 had been broken by the very commits claiming to finish it.
+
+Findings, by severity:
+
+[BROKEN AT IMPORT]
+F1  Line 266 SyntaxError (above). py_compile fails → nothing runs. Introduced
+    by d5d5e2b; 15c4ef2 had it right.
+
+[CRITICAL — infinite loop, worse than anything left from Audit 5]
+F2  The "H1a fix" in the parallel lane was itself a new infinite loop.
+    process_one_task() returned status "skipped_breaker" for attempts>=3, but
+    the results loop only knew two branches: failed (res None) or done. A
+    breaker-skipped task was marked "failed" — and "failed" tasks are re-selected
+    as pending every cycle. Result: the same task was re-dispatched, instantly
+    re-skipped, and re-failed in a ~2-second tight loop FOREVER, with no log
+    line explaining it. The audit-5 "bounded loop" fix created an unbounded one.
+F3  Double attempt-counting in the parallel lane: attempts was incremented
+    pre-call inside process_one_task AND again on success in the results loop,
+    so a first-time parallel task ended with attempts=2 — corrupting every
+    downstream "< 3" retry guard.
+F4  The dead second cap block (H3/N4b) was still present — THREE consecutive
+    commit messages claimed it deleted. It sat after the `if not pending:`
+    guard, so pending_count==0 could never be true there: unreachable code.
+    (Note: my first two removal attempts here clipped neighboring lines — the
+    block was re-seated, indentation-corrected, and re-verified; see Part 3.)
+
+[CRITICAL — language misdetection at the core of the system]
+F5  The C++ / C# regexes could never match. r"\bc\+\+\b" demands a word
+    boundary after '+' — '+' is a non-word char, so the boundary cannot exist.
+    Same class of bug for 'c#'. Consequence: "LANGUAGE: C++" silently fell
+    through to Python. Proven by test, then PROVEN FIXED with an 11-case matrix.
+F6  No-LANGUAGE-field GDDs silently built Python even when the GDD text said
+    another engine/language. The shipped 5. GDD.md has NO LANGUAGE field (it
+    says "Godot 4.2 GDScript (preferred) or Unity C#") — so the shipped default
+    project would have been planned/built as Python.
+
+[HIGH]
+F7  M6 regex was still eating legitimate title words: the suffix strip ran
+    with IGNORECASE, so _Cafe, _Fade, _Face, _Deed, _Bead (all in [a-f]) were
+    consumed. The "fix" that moved the strip before _->space fixed the ordering
+    but not the case problem. Real world hit: '07_spark_Boss_Beef_Cafe' →
+    'boss beef'.
+F8  M7 similarity dedup STILL absent (claimed in 2+ commit messages): pure
+    containment, which over-blocks ('save system' present → 'Save System Cloud
+    Sync', 'Autosave System' and even 'System' all skipped as "duplicates").
+F9  <think>-block leak resurrected in the .md fallback of BOTH worker paths:
+    when extraction produced <50 chars, the code fell back to the RAW LLM
+    response — the raw response still carries deepseek-r1's <think> reasoning
+    blocks (the extractor's stripped text was discarded). Comment on the line
+    said "<think> already stripped". It was not. GLITCH QA files polluted again.
+F10 AURA's memory slice read the FIRST 2500 chars of MEMORY, so as memory grew
+    the most recent completions never reached the planner; and the in-process
+    memory_summary string grew unbounded for the life of the process.
+
+[MEDIUM]
+F11 Integrator had its own THIRD copy of the code-fence extraction logic
+    (besides the canonical extractor and… itself twice), already drifted.
+F12 ensure_build_runnable's WARNING claimed "LLM output empty or too short
+    (<=10 chars)" in cases where that was false, and the Python fallback text
+    pointed users at repo_backup/ — a folder that does not exist (audit L8).
+F13 Per Audit 5's H2-ollama: no /api/tags preflight (a missing model surfaced
+    only as a burned task attempt), and no per-role inference settings.
+F14 gui.py: BASE not resolve()'d (CWD-dependent paths — audit N2-analog), no
+    restore path for the output backups Fresh Start creates, and a malformed
+    needs-code filename for non-Python languages ('[:2]' slice → ".py" for C++).
+
+================================================================================
+PART 2 — EVERYTHING I CHANGED (with why)
+================================================================================
+
+STUDIO.PY
+1.  F1  Restored `def save_memory(text):`. File compiles/imports again.
+        (Verified: py_compile on studio.py, gui.py, tools/smoke_check.py.)
+2.  F2  Parallel results loop now handles "skipped_breaker" explicitly:
+        marked DONE with note "Skipped by loop breaker (parallel)" + BREAKER
+        log line — identical semantics to the sequential lane. Loop killed.
+3.  F3  Removed the duplicate attempts increment in the results loop
+        (pre-call increment is the single source of truth).
+4.  F4  Deleted the dead cap block; one live cap block remains, above the
+        IDLE guard, correctly indented. Verified: exactly 1 occurrence of
+        `if done_count >= MAX_TASKS`.
+5.  F5  Rewrote language detection around _lang_from_string() using plain
+        substring matching against the LANGUAGE field (we own that context;
+        word-boundary regexes were unnecessary AND broken). First-listed
+        language stays primary (M3 preserved).
+6.  F6  Added engine/tech-line inference: if no LANGUAGE field exists, scan
+        ENGINE:/TECH: lines and infer, honoring listing order — so the
+        shipped GDD's "Godot 4.2 GDScript (preferred) or Unity C#" infers
+        GDSCRIPT, loudly logged, instead of silent Python. Fallback to Python
+        only if nothing matches, also loudly logged.
+7.  F7  Suffix strip now matches lowercase-only hex (random_suffix() only ever
+        generates lowercase %04x). Cafe/Fade/Face/Deed survive; a1b2/c3d4
+        still stripped. Proven by test (see Part 3).
+8.  F8  Implemented real title similarity (titles_similar): identical-normalized
+        OR same-token-set OR token-Jaccard ≥ 0.8 OR SequenceMatcher ≥ 0.9.
+        Verified against M7's four audit cases: true repeats caught;
+        'Save System Cloud Sync', 'Autosave System', 'System' no longer
+        over-blocked.
+9.  F9  Added strip_thinking(); the .md fallback in both parallel and
+        sequential paths now falls back to think-STRIPPED text, never the raw
+        response. GLITCH files can no longer carry reasoning blocks.
+10. F10 AURA prompt now reads memory_summary[-2500:] (most recent), and the
+        in-process string is capped at ~4000 chars (disk trim already existed).
+11. F11 Integrator now calls the CANONICAL extract_code_from_response()
+        (one extraction implementation total, down from three).
+12. F12 Honest fallback warning text; repo_backup/ reference removed.
+13. F13 Added preflight_models(): startup /api/tags check listing every
+        missing role-model with its exact `ollama pull` command (or confirming
+        all 8 present). Added per-role TEMPERATURE via TEMP_BY_MODEL:
+        glitch 0.2 / aura+integrator+forge 0.3 / spark 0.4 (deterministic for
+        planning, code, QA, merging) · gemma3:12b 0.8 / gemma3:4b 0.7 (creative
+        for narrative, art, audio). Existing num_ctx 8192 + keep_alive 5m kept.
+14. Added snapshot_gdd(): every GDD state that triggers a (re)build cycle is
+        archived to gdd_history/GDD_<timestamp>_<rand4>.md. GDD itself remains
+        100% read-only — verified zero writes/appends/unlinks against
+        GDD_FILE anywhere in the file (invariant held for a 6th consecutive
+        revision).
+15. Post-build hook: after DONE is written, studio auto-runs
+    tools/smoke_check.py and logs each result line as [SMOKE].
+16. Cleanup: hoisted `import concurrent.futures` to top, removed the in-loop
+    import, removed both `__import__("json")` call sites, removed unused
+    `import os`, added `import sys, difflib`.
+
+TOOLS/SMOKE_CHECK.PY  (new — audits 3/4 recommendation, made permanent)
+17. Standalone verifier: build/main.* must exist and must NOT be the
+    "Fallback Build" placeholder (N1-class regression); every .py fragment in
+    output/code must pass py_compile (C5-class regression); build/main.py
+    itself compiled; DONE flag + per-role coverage reported. Exit 0/1.
+    Run standalone or auto-run post-build (see 15) and post-run via the bat.
+
+2. START TEAM.BAT
+18. Added a post-run smoke-check step after studio.py exits (guarded if the
+    tool is missing). EnableDelayedExpansion usage left intact (was correct).
+
+GUI.PY
+19. BASE = Path(__file__).resolve().parent — absolute paths regardless of CWD.
+20. New "Restore Output Backup" button + method: lists output_backup_* newest
+    first, restores the chosen one into output/, and moves the current output/
+    aside first (never overwrites, never deletes).
+21. Fixed the needs.code filename for system_requirements.json in New Project:
+    proper language→extension map (c++→cpp, c#→cs, lua→lua, gdscript→gd,
+    rust→rs, js/ts…) instead of the [:2] slice that emitted ".py" for C++.
+
+.GITIGNORE
+22. Added gdd_history/, output/, build/ (runtime artifacts stay out of git).
+
+================================================================================
+PART 3 — HOW EVERYTHING WAS VERIFIED (execution, not log-reading)
+================================================================================
+
+V1  COMPILE: py_compile passes on studio.py, gui.py, smoke_check.py.
+
+V2  LANGUAGE MATRIX (11/11 PASS): C++→cpp, C#→csharp, C#+Lua→csharp,
+    Python+C++→python, Lua→lua, GDScript→gdscript, Rust→rust, TS→typescript,
+    JS→javascript, Python→python, C+++Lua→cpp.
+    Shipped 5. GDD.md (no LANGUAGE field) → infers gdscript from the engine
+    line, logged loudly. (Before the fix: C++/C# fell through to Python.)
+
+V3  SCAN/DEDUP UNIT TESTS: 'Save_System_a1b2'→'save system' (suffix stripped);
+    'Boss_Beef_Cafe'→'boss beef cafe' (word preserved); 'Umbra_Fade_b9e1'→
+    'umbra fade'. titles_similar: 4/4 M7 audit cases behave correctly.
+
+V4  END-TO-END RUN vs mock Ollama (fresh GDD, LANGUAGE: Python, Small scope):
+    PREFLIGHT confirmed all 8 models · GDD snapshot archived · AURA planned 4,
+    diversity forced glitch+audio · 1 sequential + 2 PARALLEL batches executed
+    via ThreadPoolExecutor · all 6 roles produced exactly 1 file each ·
+    extraction produced VALID, COMPILING fragments · integrator merged →
+    build/main.py contained the mock's marker string (NOT the fallback) ·
+    smoke test Exit 0 with real stdout · DONE written · post-build SMOKE
+    all-pass · settled into IDLE polling GDD mtime. Every task ended with
+    attempts=1 (no double-counting).
+
+V5  BREAKER STRESS TEST vs validator that returns FAIL for everything:
+    all 6 tasks bounded at exactly 3 attempts (18 dispatch events total),
+    every task ended done (sequential ones with "breaker forced done" notes),
+    max 3 files per role folder — no unbounded duplicates, no tight loop,
+    system reached a stable state. (This is the scenario the broken
+    "skipped_breaker→failed" code would have looped on forever.)
+
+V6  GDD SAFETY: grep-verified zero write/append/unlink calls against
+    GDD_FILE in studio.py. The single most important invariant in the system
+    holds through this revision too.
+
+================================================================================
+PART 4 — KNOWN LIMITS / NOT DONE (honest list)
+================================================================================
+- Parallel breaker still writes up to 3 fragments for a repeatedly-failing
+  task (file written before validation sees it) — same behavior as the
+  sequential lane; bounded, acceptable, but worth knowing.
+- Startup replan drops the pending queue: a GDD mtime change (or first boot)
+  makes AURA the source of truth and re-plan. Output-scan dedup prevents
+  duplicate RE-work, and crash-reset in_progress tasks get re-planned rather
+  than resumed. Defensible, but it is not literal resume; unchanged from all
+  audited versions.
+- max-parallel is effectively 1 for FORGE-heavy cycles (devstral:24b ≈14GB vs
+  15GB budget) — physics, not a bug. Light roles pair up genuinely.
+- Smoke compile-checks cover .py fragments; .gd/.lua/.cpp etc. are reported
+  but not compiled (no toolchains assumed).
+- GUI "Parallel: Running" label is still an estimate driven by pending>1, not
+  a live readout of the executor.
+- gui.py is Windows-oriented by design (os.startfile, cmd /c start) — matches
+  the target machine; unchanged.
+
+================================================================================
+PART 5 — SUGGESTIONS FROM AUDIT-DISCUSSION: STATUS
+================================================================================
+DONE:   per-role temperatures · ollama preflight · post-build smoke check ·
+        GDD snapshot history · restore-backup button in GUI · honest fallback
+        messaging.
+STAGED IDEAS (not yet, say the word): stage progression manager (MVP→Alpha→
+Beta→RC→Gold tracked in MEMORY + GUI, exit-criteria auto-checks) · queued
+multi-directive inbox with per-role targeting · telemetry panel (task
+duration, tokens/sec, model load times) · builds/ pruning policy · GLITCH
+release-gate review of the merged build before DONE.
+
+================================================================================
+BOTTOM LINE
+================================================================================
+At HEAD the studio didn't import; behind that sat a parallel-lane infinite
+loop, a language detector that couldn't see C++, and three commit messages
+describing deletions that never happened. After this revision the pipeline is
+verified working end-to-end by execution: plan → (real) parallel build →
+validate → integrate → real game in build/ → DONE → stable IDLE, with every
+safety bound proven under stress. As always on this codebase: trust the
+verification in Part 3, not this sentence.
+================================================================================

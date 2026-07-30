@@ -6,3 +6,6 @@ save_file.json
 PAUSE
 *.log
 .DS_Store
+gdd_history/
+output/
+build/

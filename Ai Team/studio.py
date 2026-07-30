@@ -11,7 +11,8 @@ AI GAME STUDIO v6 - FINAL - ANY LANGUAGE, ANY GAME TYPE, UNIQUE SPLITTING, MINIM
 - PIPELINE: IDEA (GDD READ ONLY) -> DETECT game type/language/engine -> PLAN missing only (dedup) -> BUILD once -> VALIDATE -> COMPILE /build/ -> TEST -> DONE -> IDLE (true finish)
 """
 
-import os, time, json, urllib.request, urllib.error, re, shutil, random, subprocess
+import time, json, urllib.request, urllib.error, re, shutil, random, subprocess
+import sys, difflib, concurrent.futures
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +74,41 @@ def log(msg, tag="INFO"):
             f.write(line)
     except: pass
 
+# Per-role temperature: deterministic for code/QA/build, creative for narrative/art/audio
+# (looked up by model so every call path gets it with no signature changes)
+TEMP_BY_MODEL = {
+    "qwen3:14b": 0.3,          # aura + integrator - planning/merging must be precise
+    "devstral:24b": 0.3,       # forge - engine code
+    "qwen2.5-coder:14b": 0.4,  # spark - gameplay code
+    "deepseek-r1:14b": 0.2,    # glitch - QA reasoning must be strict
+    "gemma3:12b": 0.8,         # lore + pixel - creative writing/art direction
+    "gemma3:4b": 0.7,          # audio
+}
+
+def preflight_models():
+    """Check /api/tags at startup so a missing model surfaces as a clear
+    'ollama pull X' instruction once, instead of a generic 'Call failed'
+    that silently burns task attempts (Audit5 H2-ollama)."""
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        pulled = {m.get("name", "").lower() for m in data.get("models", [])}
+        missing = []
+        for role, model in TEAM.items():
+            base = model.lower()
+            if not any(p == base or p.startswith(base.split(":")[0] + ":") for p in pulled):
+                missing.append((role, model))
+        if missing:
+            log(f"PREFLIGHT: {len(missing)} model(s) NOT pulled:", "PREFLIGHT")
+            for role, model in missing:
+                log(f"  MISSING [{role}] -> run: ollama pull {model}", "PREFLIGHT")
+        else:
+            log(f"PREFLIGHT: all {len(TEAM)} role models present in Ollama", "PREFLIGHT")
+        return missing
+    except Exception as e:
+        log(f"PREFLIGHT: could not reach Ollama (/api/tags): {e} - is 'ollama serve' running?", "PREFLIGHT")
+        return None
+
 def call_ollama(model, system_prompt, user_prompt, timeout=400):
     url = "http://localhost:11434/api/chat"
     payload = {
@@ -83,7 +119,8 @@ def call_ollama(model, system_prompt, user_prompt, timeout=400):
         ],
         "stream": False,
         "options": {
-            "num_ctx": 8192
+            "num_ctx": 8192,
+            "temperature": TEMP_BY_MODEL.get(model, 0.6)
         },
         "keep_alive": "5m"
     }
@@ -115,74 +152,79 @@ def refresh_gdd_path():
     GDD_FILE = get_gdd_path()
     return GDD_FILE
 
-# === v6.1 FIXED: Language Detection - Word boundaries + explicit field first ===
+# === v6.1 FIXED: Language Detection - Explicit field first, engine-hint fallback ===
+def _lang_from_string(s):
+    """Map a language/engine string to (primary, ext, run_cmd) using plain
+    substring matching. This only ever runs against the LANGUAGE field or
+    engine/tech hint lines - text that IS about languages - so word-boundary
+    regexes are unnecessary, and the old ones were actively broken:
+    r'\\bc\\+\\+\\b' can NEVER match because '+' is a non-word character, so a
+    word boundary cannot follow it (same for 'c#'). LANGUAGE: C++ silently
+    fell through to Python."""
+    t = s.lower()
+    if "c++" in t or "cpp" in t:
+        return "cpp", ".cpp", "g++ main.cpp -o game && game.exe"
+    if "c#" in t or "csharp" in t:
+        return "csharp", ".cs", "dotnet run"
+    if "gdscript" in t or "godot" in t:
+        return "gdscript", ".gd", "godot --path . main.tscn"
+    if "lua" in t or "love2d" in t:
+        return "lua", ".lua", "lua main.lua"
+    if "rust" in t:
+        return "rust", ".rs", "cargo run"
+    if "typescript" in t:
+        return "typescript", ".ts", "npx ts-node main.ts"
+    if "javascript" in t or re.search(r"\bjs\b", t):
+        return "javascript", ".js", "node main.js"
+    if "python" in t or "pygame" in t:
+        return "python", ".py", "python main.py"
+    if "unreal" in t:
+        return "cpp", ".cpp", "g++ main.cpp -o game && game.exe"
+    if "unity" in t:
+        return "csharp", ".cs", "dotnet run"
+    return None, None, None
+
 def detect_language(gdd_text):
-    # First, look for explicit LANGUAGE field with word boundaries
-    lang = "Python"
+    # First, look for explicit LANGUAGE field
+    lang = ""
     for line in gdd_text.splitlines():
         if re.match(r"^\s*LANGUAGE\s*:", line, re.IGNORECASE):
-            parts = line.split(":",1)
-            if len(parts)>1 and parts[1].strip():
+            parts = line.split(":", 1)
+            if len(parts) > 1 and parts[1].strip():
                 lang = parts[1].strip()[:50]
                 break
-    
-    # FIX M3: First listed language is primary - split by + and take first token
-    # e.g., "Python + C++" -> primary = Python, not C++ (old checked C++ first)
-    # e.g., "C++ + Lua" -> primary = C++ 
-    first_lang = lang.split("+")[0].strip().lower() if "+" in lang else lang.lower()
-    lower_first = first_lang  # Primary is first listed
-    lower_lang = lang.lower()  # Full string for secondary detection
 
-    primary = "python"
-    ext = ".py"
-    run_cmd = "python main.py"
+    if lang:
+        # FIX M3: First listed language is primary - split by + and take first token
+        # e.g., "Python + C++" -> primary = Python, not C++ (old checked C++ first)
+        first_lang = lang.split("+")[0].strip()
+        primary, ext, run_cmd = _lang_from_string(first_lang)
+        if not primary:
+            primary, ext, run_cmd = _lang_from_string(lang)
+        if primary:
+            return lang, primary, ext, run_cmd
 
-    # Check primary (first listed) first, with word boundaries
-    if re.search(r"\bc\+\+|\bcpp\b", lower_first):
-        primary = "cpp"
-        ext = ".cpp"
-        run_cmd = "g++ main.cpp -o game && game.exe"
-    elif re.search(r"\bc#\b|^\s*c#|csharp", lower_first):
-        primary = "csharp"
-        ext = ".cs"
-        run_cmd = "dotnet run"
-    elif re.search(r"\blua\b", lower_first):
-        primary = "lua"
-        ext = ".lua"
-        run_cmd = "lua main.lua"
-    elif re.search(r"\bgdscript\b|godot", lower_first):
-        primary = "gdscript"
-        ext = ".gd"
-        run_cmd = "godot --path . main.tscn"
-    elif re.search(r"\brust\b", lower_first):
-        primary = "rust"
-        ext = ".rs"
-        run_cmd = "cargo run"
-    elif re.search(r"\btypescript\b|\bts\b", lower_first):
-        primary = "typescript"
-        ext = ".ts"
-        run_cmd = "npx ts-node main.ts"
-    elif re.search(r"\bjavascript\b|\bjs\b", lower_first):
-        primary = "javascript"
-        ext = ".js"
-        run_cmd = "node main.js"
-    elif re.search(r"\bpython\b", lower_first):
-        primary = "python"
-        ext = ".py"
-        run_cmd = "python main.py"
-    else:
-        # Fallback: if first token didn't match, check full string in old order for secondary
-        if re.search(r"\bc\+\+|\bcpp\b", lower_lang):
-            primary = "cpp"
-            ext = ".cpp"
-            run_cmd = "g++ main.cpp -o game && game.exe"
-        elif re.search(r"\bpython\b", lower_lang):
-            primary = "python"
-            ext = ".py"
-            run_cmd = "python main.py"
-    
-    full_lang = lang
-    return full_lang, primary, ext, run_cmd
+    # No usable LANGUAGE field - infer from ENGINE/TECH hints before defaulting.
+    # Shipped GDDs often specify an engine (e.g. "Godot 4.2 GDScript preferred")
+    # but omit the LANGUAGE line entirely; silent-Python was the Python-only bug.
+    for line in gdd_text.splitlines():
+        if re.match(r"^\s*(ENGINE|TECH)\s*:", line, re.IGNORECASE) or "engine:" in line.lower():
+            try:
+                hint_part = line.split(":", 1)[1]
+            except IndexError:
+                hint_part = line
+            # Respect listing order within the line: check segments first->last
+            # so "Godot GDScript (preferred) or Unity C#" infers gdscript,
+            # not the second-listed unity/csharp (M3 ordering rule)
+            segments = re.split(r"\bor\b|,|/|\||-", hint_part.lower())
+            for seg in segments:
+                primary, ext, run_cmd = _lang_from_string(seg.strip())
+                if primary:
+                    log(f"No LANGUAGE field - inferred {primary} from engine/tech line: {line.strip()[:60]}", "DETECT")
+                    return f"Inferred {primary} (add LANGUAGE: field to GDD to pin)", primary, ext, run_cmd
+
+    log("No LANGUAGE field and no engine hint - defaulting to Python (add LANGUAGE: field to pin)", "DETECT")
+    return "Python", "python", ".py", "python main.py"
 
 # === v6.1 FIXED: Game Type Detection - Explicit field first, word boundaries ===
 def detect_game_type(gdd_text):
@@ -254,8 +296,13 @@ def scan_existing_outputs():
             if f.stat().st_size < 10:
                 continue
             stem = f.stem
-            stem = re.sub(r"_[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
-            stem = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", stem, flags=re.IGNORECASE)
+            # FIX M6 (for real this time): strip the _XXXX random suffix from the
+            # stem BEFORE the _->space conversion, and WITHOUT IGNORECASE.
+            # random_suffix() only ever generates lowercase hex; matching
+            # case-insensitively eats legitimate Title-case trailing words
+            # (Cafe/Fade/Face/Deed/Bead are all in [a-f]).
+            stem = re.sub(r"_(core|utils|api|part\d+)_?[a-f0-9]{4}$", "", stem)
+            stem = re.sub(r"_[a-f0-9]{4}$", "", stem)
             name = stem.lower().replace("_"," ").replace("-"," ")
             name = re.sub(r"^\d+\s+","", name)
             name = re.sub(r"^(forge|spark|lore|pixel|glitch|aura|integrator|audio)\s+","", name)
@@ -263,7 +310,7 @@ def scan_existing_outputs():
             existing_titles.add(name.strip())
     return existing, existing_titles
 
-def save_memorydef save_memory(text):
+def save_memory(text):
     try:
         # FIX M11: Trim MEMORY.md on disk to prevent unbounded growth, keep last 3000 chars
         # Previously only read was truncated, disk file grew forever
@@ -326,6 +373,47 @@ def extract_code_from_response(result, primary="python"):
     # If no fences, return cleaned result (FIX C5: was returning original.strip() discarding <think> stripping)
     return result.strip()
 
+def _norm_title(s):
+    """Normalize a title for comparison: alnum-only tokens, lowercase."""
+    return re.sub(r"[^a-z0-9 ]", " ", s.lower()).split()
+
+def titles_similar(a, b):
+    """Real similarity metric (replaces pure containment - Audit M7).
+    A new task title is a duplicate of an existing one when:
+      - normalized strings are identical, OR
+      - token Jaccard >= 0.8, OR
+      - SequenceMatcher ratio >= 0.85
+    Verified against M7's over-blocking cases: with 'save system' present,
+    'Save System Cloud Sync' (0.67), 'Autosave System' (0.33) and 'System'
+    (0.5) must NOT match, while true repeats and trivial renames must."""
+    if not a or not b:
+        return False
+    na, nb = a.strip().lower(), b.strip().lower()
+    if na == nb:
+        return True
+    ta, tb = set(_norm_title(a)), set(_norm_title(b))
+    if not ta or not tb:
+        return False
+    if ta == tb:  # same words, different order/spacing e.g. "Save-System" vs "save system"
+        return True
+    jacc = len(ta & tb) / len(ta | tb)
+    if jacc >= 0.8 and min(len(ta), len(tb)) >= 2:
+        return True
+    if difflib.SequenceMatcher(None, "".join(sorted(ta)), "".join(sorted(tb))).ratio() >= 0.9:
+        return True
+    return False
+
+def strip_thinking(text):
+    """Remove <think>/<thinking> blocks without touching anything else.
+    Used as the safe .md fallback so GLITCH (deepseek-r1) never lands raw
+    reasoning blocks in output/qa/*.md (C5 regression in the md branch)."""
+    if not text:
+        return text
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
 def random_suffix():
     return f"{random.randint(0, 0xFFFF):04x}"
 
@@ -353,6 +441,22 @@ def folder_for_role(role):
     if role in ["audio"]:
         return "audio"
     return "code"
+
+def snapshot_gdd(reason="change"):
+    """Archive every GDD state that triggers a (re)build so each rebuild is
+    attributable to the edit that caused it. GDD itself stays read-only -
+    we only copy FROM it."""
+    try:
+        hist = BASE / "gdd_history"
+        hist.mkdir(exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = hist / f"GDD_{stamp}_{random_suffix()}.md"
+        shutil.copy(GDD_FILE, dest)
+        log(f"GDD snapshot saved ({reason}): {dest.name}", "GDD-HISTORY")
+        return dest
+    except Exception as e:
+        log(f"GDD snapshot failed ({reason}): {e}", "GDD-HISTORY")
+        return None
 
 def export_build(stage_name):
     """Export current build to unique folder before clearing - industry standard"""
@@ -424,7 +528,7 @@ print(" Fallback Build - Custom Engine From Scratch")
 print(" Language: Python - Engine: {engine_mode}")
 print(" This fallback ensures build/ ALWAYS runnable - start>finish guarantee")
 print("="*60)
-print("Your fragments are in output/ - check repo_backup/ for original files")
+print("Your fragments are in output/ - check output/ folder")
 print("Edit 5. GDD.md to trigger rebuild")
 ''',
         ".cpp": f'''
@@ -465,7 +569,7 @@ console.log("Fallback Build - Custom Engine JS - Engine: {engine_mode}");
 
     content = fallbacks.get(primary_ext, fallbacks[".py"])
     main_path.write_text(content, encoding="utf-8")
-    log(f"Fallback build created: {main_path} (language {primary_ext}) - WARNING: LLM output was empty or too short (<=10 chars), so fallback placeholder used instead of LLM game", "BUILD")
+    log(f"Fallback build created: {main_path} - no valid LLM main existed, placeholder written instead", "BUILD")
 
     # Create run.bat / run.sh language-aware
     run_bat = BUILD_DIR / "run.bat"
@@ -508,6 +612,7 @@ def main():
     log(f"Detected Game Type: {game_type}", "DETECT")
     log(f"Team: {', '.join([f'{k}={v}' for k,v in TEAM.items()])}", "INFO")
     log("==================================================", "START")
+    preflight_models()
 
     tasks = []
     if TASKS_FILE.exists():
@@ -560,6 +665,7 @@ def main():
             if gdd_changed:
                 log(f"{GDD_FILE.name} changed! Re-reading GDD read-only...", "AURA")
                 last_gdd_mtime = cur_mtime
+                snapshot_gdd("gdd_changed")
                 # Remove DONE to allow rebuild
                 done_path = BUILD_DIR / "DONE"
                 if done_path.exists():
@@ -652,35 +758,15 @@ Requirements:
                     BUILD_DIR.mkdir(exist_ok=True)
                     if result:
                         (BUILD_DIR / "integrator_output.md").write_text(result, encoding="utf-8")
-                        # Try extract code block for detected language
-                        # Look for ```python, ```cpp, etc.
+                        # Use the CANONICAL extractor (same as worker path) instead of a
+                        # third divergent implementation that drifted out of sync twice
                         main_path = BUILD_DIR / f"main{ext}"
-                        # Try generic extraction
-                        pattern = f"```{primary}"
-                        if pattern in result.lower():
-                            # Find case insensitive
-                            lower_res = result.lower()
-                            idx = lower_res.find(pattern)
-                            if idx != -1:
-                                # Extract from original result at idx
-                                after = result[idx+len(pattern):]
-                                code = after.split("```")[0]
-                                if len(code.strip()) > 10:  # FIX N1: Lowered from 50 to 10, 44-char games are valid
-                                    main_path.write_text(code, encoding="utf-8")
-                                    log(f"Build {main_path.name} extracted from LLM", "BUILD")
-                        elif "```" in result:
-                            # Fallback extract first code block
-                            parts = result.split("```")
-                            for i in range(1, len(parts), 2):
-                                code_candidate = parts[i]
-                                # Remove language identifier first line if present
-                                lines = code_candidate.splitlines()
-                                if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","lua","gdscript","rust","javascript","js"]:
-                                    code_candidate = "\n".join(lines[1:])
-                                if len(code_candidate.strip()) > 10:  # FIX N1: Lowered from 100 to 10
-                                    main_path.write_text(code_candidate, encoding="utf-8")
-                                    log(f"Build {main_path.name} extracted (fallback)", "BUILD")
-                                    break
+                        code = extract_code_from_response(result, primary)
+                        if code and len(code.strip()) > 10:
+                            main_path.write_text(code, encoding="utf-8")
+                            log(f"Build {main_path.name} extracted from LLM ({len(code)} chars)", "BUILD")
+                        else:
+                            log("Integrator output had no usable code block - fallback will handle", "BUILD")
                     
                     ensure_build_runnable(ext, run_cmd, engine_mode, gdd_text)
 
@@ -699,6 +785,13 @@ Requirements:
 
                     (BUILD_DIR / "DONE").write_text(f"DONE at {datetime.now()}\nEngine: {engine_mode}\nLanguage: {full_lang}\nType: {game_type}\nFragments: {len(existing_files)}\n", encoding="utf-8")
                     log(f"FINAL BUILD DONE in {BUILD_DIR} - DONE file written - TRUE FINISH", "DONE")
+                    # Post-build self-check (the two-line check from audits 3/4, made permanent)
+                    try:
+                        sc = subprocess.run([sys.executable, str(BASE / "tools" / "smoke_check.py")], timeout=30, capture_output=True, text=True, cwd=str(BASE))
+                        for line in (sc.stdout or "").strip().splitlines()[:12]:
+                            log(f"SMOKE: {line}", "SMOKE")
+                    except Exception as sc_err:
+                        log(f"Smoke check could not run: {sc_err}", "SMOKE")
                     inbox_directive_global = ""
                     time.sleep(10)
                     continue
@@ -718,7 +811,7 @@ Requirements:
 You are AURA supervisor. GDD READ ONLY.
 
 MEMORY:
-{memory_summary[:2500]}
+{memory_summary[-2500:]}
 
 GDD (READ ONLY):
 {gdd_text[:4500]}
@@ -777,18 +870,19 @@ JSON only.
                 all_ids = [t.get("id",0) for t in tasks] + existing_ids
                 next_id = max(all_ids, default=0) + 1
 
+                improve_mode = any(k in gdd_text.lower() for k in ["improve","redo","rebuild"])
                 for nt in new_tasks:
                     if "id" not in nt:
                         nt["id"] = next_id
                         next_id += 1
-                    safe = re.sub(r"[^a-z0-9]","", nt.get("title","").lower())
                     is_dup = False
+                    # FIX M7: real similarity (titles_similar) instead of raw
+                    # containment that over-blocked legit follow-up work
                     for ex in existing_titles:
-                        ex_safe = re.sub(r"[^a-z0-9]","", ex.lower())
-                        if ex_safe and len(safe)>5 and (ex_safe in safe or safe in ex_safe):
-                            if not any(k in gdd_text.lower() for k in ["improve","redo","rebuild"]):
+                        if titles_similar(nt.get("title",""), ex):
+                            if not improve_mode:
                                 is_dup = True
-                                log(f"Dedup skip: {nt['title']} already exists as {ex}", "DEDUP")
+                                log(f"Dedup skip: {nt['title']} similar to existing {ex}", "DEDUP")
                                 break
                     if not is_dup:
                         nt["status"] = "pending"
@@ -875,11 +969,7 @@ JSON only.
             if pending_count == 0:
                 log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
                 if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
-                    try:
-                        # Use export_build defined later, but call via function if exists
-                        export_build(f"CAP_{MAX_TASKS}")
-                    except Exception:
-                        pass
+                    export_build(f"CAP_{MAX_TASKS}")
                     if not (BUILD_DIR / "DONE").exists():
                         (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
                 else:
@@ -928,41 +1018,10 @@ JSON only.
         else:
             parallel_batch = [pending[0]]
 
-        # FIX C-cap / H3: Max tasks cap - properly scoped, does not delete pending work, does not write false DONE without build
-        # Parse scope from MEMORY or GDD (not from unbound local gdd_text)
-        MAX_TASKS = 25
-        try:
-            # Try to get scope from MEMORY.md or tasks or GDD file
-            mem_text = read_file(MEMORY_FILE).lower() + " " + read_file(GDD_FILE).lower()
-            if "large (50" in mem_text or "50 tasks" in mem_text:
-                MAX_TASKS = 50
-            elif "small (10" in mem_text:
-                MAX_TASKS = 10
-        except Exception:
-            pass
-        done_count = len([t for t in tasks if t.get("status")=="done"])
-        pending_count = len([t for t in tasks if t.get("status") in ["pending","failed","in_progress"]])
-        if done_count >= MAX_TASKS and pending_count == 0:
-            # FIX N3: Idempotency guard - only export once, not every 15s forever (would fill disk)
-            if (BUILD_DIR / "DONE").exists():
-                log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached and DONE already exists - IDLE (prevents disk-filler export loop)", "CAP")
-                time.sleep(15)
-                continue
-            log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
-            if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
-                export_build(f"CAP_{MAX_TASKS}")
-                if not (BUILD_DIR / "DONE").exists():
-                    (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
-            else:
-                log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
-            time.sleep(15)
-            continue
-
         # FIX H1: True parallel execution via ThreadPoolExecutor - max 2 models in 16GB VRAM
         # If parallel batch >1, process in parallel, else process single
         if len(parallel_batch) > 1:
             log(f"Executing parallel batch of {len(parallel_batch)} tasks in parallel (ThreadPoolExecutor)", "PARALLEL")
-            import concurrent.futures
 
             def process_one_task(t_item):
                 # FIX H1a Audit5: Move breaker + in_progress marking BEFORE call_ollama to stop 3 duplicate files
@@ -1009,7 +1068,7 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 cleaned = extract_code_from_response(result, prim)
                 if ext_to_use == ".md" and len(cleaned) < 50:
-                    cleaned = result
+                    cleaned = strip_thinking(result)  # think-stripped, never raw reasoning blocks
                 fpath.write_text(cleaned, encoding="utf-8")
                 return (t_item, (fpath, cleaned, result), "done")
 
@@ -1032,14 +1091,23 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                 # Find task in main tasks list
                 for tt in tasks:
                     if tt.get("id") == task_item.get("id"):
-                        if status == "failed" or res is None:
+                        if status == "skipped_breaker":
+                            # FIX: old code fell into the res-is-None branch and marked the
+                            # task "failed" - and "failed" tasks are re-selected as pending
+                            # every cycle, so a breaker-skipped task was re-dispatched in a
+                            # 2-second tight loop forever. Mark done like the sequential path.
+                            tt["status"] = "done"
+                            tt["note"] = "Skipped by loop breaker (parallel)"
+                            log(f"LOOP BREAKER: Skip {tt['title']} after {tt.get('attempts',0)} attempts (parallel)", "BREAKER")
+                        elif status == "failed" or res is None:
                             tt["status"] = "failed"
                         else:
                             tt["status"] = "done"
                             tt["output_file"] = str(res[0])
-                            tt["attempts"] = tt.get("attempts",0)+1
+                            # attempts already incremented BEFORE the call in
+                            # process_one_task - do NOT increment again (was double-count)
                         break
-            TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
+            TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
 
             # Validate each result sequentially
             for task_item, res, status in results:
@@ -1066,7 +1134,7 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
                                 if tt.get("id") == task_item.get("id") and tt.get("attempts",0) < 3:
                                     tt["status"] = "pending"
                                     tt["prompt"] = tt["prompt"] + f"\nCORRECTION: {v.get('fix')}"
-                        TASKS_FILE.write_text(__import__("json").dumps(tasks, indent=2), encoding="utf-8")
+                        TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
                 except Exception as e:
                     log(f"Validation parse fail parallel: {e}", "VALIDATE")
             time.sleep(2)
@@ -1140,7 +1208,7 @@ RULES: Stay lane, respect engine+language+type, output file-ready result in {ful
         cleaned_result = extract_code_from_response(result, primary)
         # For lore/glitch/qa roles (.md), keep original if cleaning would remove too much? But still strip <think>
         if ext_to_use == ".md" and len(cleaned_result) < 50:
-            cleaned_result = result  # Keep original for lore if extraction too aggressive, but <think> already stripped
+            cleaned_result = strip_thinking(result)  # safe raw fallback: think-stripped (old comment lied - raw result still carried <think> blocks)
         fpath.write_text(cleaned_result, encoding="utf-8")
         log(f"{role.upper()} DONE -> {fpath} ({len(cleaned_result)} chars, raw {len(result)} chars) [{full_lang}]", "DONE")
 
@@ -1185,6 +1253,10 @@ Output JSON ONLY: {{"verdict":"PASS/FAIL","reason":"...","fix":"..."}}
                 task["output_file"] = str(fpath)
                 TASKS_FILE.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
                 memory_summary += f"\n- Done: {task['title']} [{role}] {full_lang} -> {verdict}"
+                # Cap in-process growth - disk file is trimmed by save_memory,
+                # but this string lived for the whole process run before
+                if len(memory_summary) > 4000:
+                    memory_summary = memory_summary[-3000:]
                 save_memory(memory_summary)
             else:
                 # No validation response at all - treat as failed, retry if attempts left, not silent PASS
