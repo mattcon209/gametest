@@ -304,7 +304,7 @@ def extract_code_from_response(result, primary="python"):
                     # Strip first line if it's just language identifier left
                     code = code.strip()
                     # Remove leading/trailing extra markdown
-                    if len(code) > 50:
+                    if len(code) > 10:  # FIX C5 Audit4: lowered from 50 to 10 - short helper classes valid
                         return code.strip()
 
     # Fallback: extract first generic code block ``` ... ```
@@ -318,7 +318,7 @@ def extract_code_from_response(result, primary="python"):
             if lines and lines[0].strip().lower() in ["python","cpp","c++","c#","csharp","lua","gdscript","rust","javascript","js","typescript","ts","gd","csharp"]:
                 code_candidate = "\n".join(lines[1:])
             code_candidate = code_candidate.strip()
-            if len(code_candidate) > 50:  # Minimal viable code length
+            if len(code_candidate) > 10:  # FIX C5: lowered from 50 to 10 code length
                 return code_candidate
 
     # If no fences, return cleaned result (FIX C5: was returning original.strip() discarding <think> stripping)
@@ -873,14 +873,13 @@ JSON only.
             if pending_count == 0:
                 log(f"Max tasks cap {done_count} >= {MAX_TASKS} reached - true finish - will export build if exists and go IDLE", "CAP")
                 if (BUILD_DIR / "main.py").exists() or any((BUILD_DIR / f"main{e}").exists() for e in [".cpp",".cs",".lua",".gd",".rs",".js",".ts"]):
-                    from pathlib import Path as _P
                     try:
                         # Use export_build defined later, but call via function if exists
                         export_build(f"CAP_{MAX_TASKS}")
                     except Exception:
                         pass
                     if not (BUILD_DIR / "DONE").exists():
-                        (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {__import__('datetime').datetime.now()} - {done_count} tasks done", encoding="utf-8")
+                        (BUILD_DIR / "DONE").write_text(f"DONE cap {MAX_TASKS} reached at {datetime.now()} - {done_count} tasks done", encoding="utf-8")
                 else:
                     log(f"Cap reached but no build/main.* exists - NOT writing DONE, will trigger build next cycle", "CAP")
                 time.sleep(15)

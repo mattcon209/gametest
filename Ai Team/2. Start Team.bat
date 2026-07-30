@@ -1,10 +1,10 @@
 @echo off
-setlocal DisableDelayedExpansion
+setlocal EnableDelayedExpansion
 title 2. START TEAM - Live Scrolling Log - Ai Team
 color 0B
 
 echo ================================================
-echo  2. START TEAM - AUTONOMOUS GAME STUDIO v2
+echo  2. START TEAM - AUTONOMOUS GAME STUDIO v6
 echo  This IS the live scrolling log you asked for
 echo  Leave this window open - it updates in real-time
 echo ================================================
@@ -19,7 +19,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo Trying full path...
     if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" (
         set ollama_exe=%LOCALAPPDATA%\Programs\Ollama\ollama.exe
-        "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" --version
+        "!LOCALAPPDATA!\Programs\Ollama\ollama.exe" --version
     ) else (
         pause
         exit /b
@@ -49,11 +49,11 @@ if not exist studio.py (
 )
 
 echo Starting Ollama background service if not already running...
-start /B %ollama_exe% serve >nul 2>&1
+start /B !ollama_exe! serve >nul 2>&1
 timeout /t 3 >nul
 
 echo.
-echo GDD Prompt File (File #4): "%CD%\5. GDD.md"
+echo GDD Prompt File (File #5): "%CD%\5. GDD.md"
 echo Output Folder: "%CD%\output\"
 echo Logs: "%CD%\logs.txt"
 echo Memory: "%CD%\MEMORY.md"
@@ -70,7 +70,7 @@ echo LIVE LOG BELOW - REAL TIME SCROLLING:
 echo ================================================
 echo.
 
-%PYTHON% studio.py
+!PYTHON! studio.py
 
 echo.
 echo ================================================
