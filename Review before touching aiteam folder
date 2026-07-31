@@ -6,18 +6,20 @@ Method: read every file, trace against Audits 1–5 + spec docs, then PROVE ever
 claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 ================================================================================
 
->>> CURRENT STATE: PART 10 is the newest section — read it first.
+>>> CURRENT STATE: PART 12 is the newest section — read it first.
 >>> This file is append-only and layered. Later parts supersede earlier ones:
 >>>   Parts 0–5  v6.7 fix-round report (written at 537af98)
 >>>   Part 6     independent audit #6 + repair (at 470cf20)
 >>>   Part 7     audit round 7 + repair (at 18817a1)
 >>>   Part 8     independent audit #8 + repair (at 865c831)
 >>>   Part 9     audit round 9 + repair (at 74b0164)
->>>   Part 10    independent audit #10 + hardening (at HEAD) <- CURRENT
+>>>   Part 10    independent audit #10 + hardening (at 1cb94e8)
+>>>   Part 11    audit round 11 + repair (at cae3a3e)
+>>>   Part 12    C++ readiness pass - RUN-BREAKER FOUND (at HEAD) <- CURRENT
 >>> Each part re-verified the one before it by execution. Where they disagree,
 >>> the HIGHER-numbered part is newer and was re-tested.
->>> Before changing anything read: 10.2 (findings), 10.4 (still open),
->>> 6.5 + 8.5 + 10.5 (standing advice).
+>>> Before changing anything read: 12.1 (the duplicate-id run-breaker),
+>>> 12.3 (still open), 6.5 + 8.5 + 10.5 (standing advice).
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -807,7 +809,7 @@ Everything from 8.4 not restated here still applies.
 
 ================================================================================
 ================================================================================
-PART 10 — INDEPENDENT AUDIT #10 + HARDENING (newest section)
+PART 10 — INDEPENDENT AUDIT #10 + HARDENING (audited 74b0164)
 Auditor: Arena agent (author of Audits 1–8)
 Audited: 74b0164 ("Audit9 repair: idle-watch, log rolling trim, cap-export DONE
 gating, directive dedupe, call telemetry") = Part 9 · Hardened at HEAD
@@ -951,7 +953,7 @@ V7  Heartbeat: 1 line + 1 model load across 70s of idling.
 ================================================================================
 
 ================================================================================
-PART 11 — AUDIT ROUND 11 + REPAIR (audited HEAD 1cb94e8 = Part 10)
+PART 11 — AUDIT ROUND 11 + REPAIR (audited 1cb94e8 = Part 10)
 ================================================================================
 Auditor: agent that authored Parts 0–5, 7, 9, back per the repeat request.
 Method: pulled, verified Part 10's heartbeat (C1) in code + execution, then
@@ -1023,4 +1025,102 @@ V4  PYTHON REGRESSION e2e: 6 tasks done attempts=1, real build/main.py,
   bounded by phase checkpoints instead of only the loop top).
 - M8 closed-by-design (Parts 7/8 concur). Do not scaffold it.
 - docs/archive/* remain intentionally stale history; README is now accurate.
+================================================================================
+
+
+================================================================================
+================================================================================
+PART 12 — C++ READINESS PASS (newest section) — RUN-BREAKER FOUND
+Auditor: Arena agent (author of Audits 1-8, 10)
+Trigger: the owner's first real project is C++ heavy (Budget Bodyguards), and
+every prior audit had been driven with a Python GDD.
+Method: ran the ACTUAL Budget Bodyguards GDD (LANGUAGE: C++, custom engine)
+end to end against a mock Ollama that behaves like a real model - including
+returning its own task ids, which no previous test had exercised.
+================================================================================
+
+12.0 — WHY THIS PASS EXISTED
+--------------------------------------------------------------------------------
+Parts 6-11 all concluded "clean" or "polish only". Every one of those runs used
+a Python GDD and a mock that let studio assign task ids. The owner's real
+project is C++. Switching language + letting the model supply its own ids
+surfaced a hard run-breaker within one run. Worth stating plainly: nine audits
+missed this because the fixture never varied on those two axes.
+
+12.1 — RUN-BREAKER: DUPLICATE TASK IDS (fixed)
+--------------------------------------------------------------------------------
+SYMPTOM (reproduced twice, 95s and 150s runs, C++ GDD):
+  output/ filled with valid fragments, but build/ stayed COMPLETELY EMPTY.
+  No main.cpp, no DONE, no export. Zero INTEGRATOR activity in 245s.
+  tasks.json showed: id=1 forge done / id=2 spark done /
+                     id=1 lore in_progress / id=2 pixel in_progress
+
+ROOT CAUSE:
+  Planning did `if "id" not in nt:` - i.e. it TRUSTED the id the model returned.
+  AURA's own prompt shows `{"id":1,...}` as the output example, so models
+  routinely return 1,2,3 every planning cycle. Those collide with existing
+  tasks, and the diversity injector then allocated from next_id and collided
+  again.
+  Both the parallel results loop and the validation loop locate their task with
+      for tt in tasks:
+          if tt.get("id") == task_item.get("id"): ...; break
+  which matches the FIRST holder of that id. A finished task's result is
+  therefore written onto an unrelated older task, and the real one is never
+  marked done - it sits at in_progress forever.
+  pending never drains -> `len(pending)==0` never true -> INTEGRATOR NEVER
+  RUNS. The system looks busy and healthy in the log while being permanently
+  incapable of finishing.
+
+  This is almost certainly the owner's original reported failure: "it was
+  looping / making infinite versions" plus "the whole export and compile
+  system - the finish - was missing". Both symptoms fall out of this one bug.
+
+FIX: never trust model-supplied ids. All planned tasks and all forced-diversity
+tasks now allocate from one collision-checked pool (`_used_ids`), so ids are
+unique by construction.
+VERIFIED: same GDD, same colliding mock -> ids unique, 0 stuck in_progress,
+INTEGRATOR ran, build/main.cpp + DONE produced.
+
+12.2 — FINISH-PACKAGE GAPS (fixed)
+--------------------------------------------------------------------------------
+run.bat / run.sh were written at the BOTTOM of ensure_build_runnable(), which
+returns early whenever the integrator already produced a good main.* - i.e. on
+the SUCCESS path. Net effect: launchers only appeared when the FALLBACK
+PLACEHOLDER was written. Exactly backwards.
+  Python: masked, because the GUI's Run Build has a `python main.py` fallback.
+  C++/C#/Rust/Lua/GDScript: no run.bat at all -> the GUI button just opens the
+  folder and the user has no build command. For a compiled language the build
+  command is not guessable from the folder contents.
+FIX: extracted write_launchers(); called on BOTH paths. run.sh is chmod +x and
+uses `g++ main.cpp -o game && ./game` rather than the .exe form.
+
+build/README.md was promised in the README pipeline line ("main.<ext> +
+run.bat/run.sh + README + DONE") and was written by NO code path at all.
+FIX: written by write_launchers() with the actual per-language run command.
+
+VERIFIED on the C++ run: build/ now contains main.cpp, run.bat, run.sh,
+README.md, DONE, test_results.txt. run.bat holds
+`g++ main.cpp -o game.exe && game.exe`.
+
+12.3 — STILL OPEN
+--------------------------------------------------------------------------------
+· INTEGRATOR emits #include "engine/core.h" style headers without the system
+  guaranteeing those files exist. A merged C++ build can therefore reference
+  headers that were never generated. Not introduced by this pass and not fixed
+  here; smoke_check flags it only indirectly (main.cpp is syntactically fine in
+  isolation). WATCH THIS on the first real C++ run - if the build won't link,
+  this is the likely reason, not the orchestrator.
+· smoke_check compiles .py only; .cpp gets fence/<think>/non-trivial checks but
+  no g++ syntax pass (no toolchain assumed).
+· Everything carried forward from 10.4 still applies.
+
+12.4 — ADVICE
+--------------------------------------------------------------------------------
+15. Vary the FIXTURE, not just the code. Nine consecutive audits passed because
+    they all used a Python GDD and never let the model choose its own ids. The
+    bug was old, deterministic, and instantly reproducible - it just lived
+    outside the shape of every previous test.
+16. Any lookup of the form `if x.get("id") == other.get("id"): break` assumes
+    uniqueness. If ids can come from an LLM, they are not unique. Treat every
+    model-supplied identifier as hostile.
 ================================================================================
