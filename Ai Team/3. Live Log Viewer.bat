@@ -1,5 +1,7 @@
 @echo off
 setlocal DisableDelayedExpansion
+:: FIX (Audit13): pin CWD to this script's folder so relative paths work
+cd /d "%~dp0"
 title 3. LIVE LOG VIEWER - Real-Time Monitor
 color 0E
 

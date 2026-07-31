@@ -96,6 +96,41 @@ TEMP_BY_MODEL = {
     "gemma3:4b": 0.7,          # audio
 }
 
+def preflight_toolchain(primary, run_cmd):
+    """FIX (Audit13): warn at STARTUP when the detected language needs a compiler
+    that is not installed.
+
+    Real-run failure: a C++ project completed, wrote build/run.bat containing
+    `g++ main.cpp -o game.exe`, and the user got "g++ is not recognized" - because
+    1. Install and Setup.bat installs Python + Ollama + models and NOTHING else.
+    No toolchain check existed anywhere. The build is not broken; the machine
+    simply cannot compile it. Say so up front instead of at the finish line.
+    """
+    need = {
+        "cpp":      ("g++",     "winget install -e --id MSYS2.MSYS2   (then: pacman -S mingw-w64-ucrt-x86_64-gcc)\n"
+                                "                       or: winget install -e --id Microsoft.VisualStudio.2022.BuildTools"),
+        "csharp":   ("dotnet",  "winget install -e --id Microsoft.DotNet.SDK.8"),
+        "rust":     ("cargo",   "winget install -e --id Rustlang.Rustup"),
+        "lua":      ("lua",     "winget install -e --id DEVCOM.Lua"),
+        "javascript": ("node",  "winget install -e --id OpenJS.NodeJS.LTS"),
+        "typescript": ("node",  "winget install -e --id OpenJS.NodeJS.LTS"),
+        "gdscript": ("godot",   "install Godot 4.x and open this folder as a project"),
+    }
+    if primary not in need:
+        return True  # python: the interpreter running us is proof enough
+    exe, how = need[primary]
+    if shutil.which(exe):
+        log(f"TOOLCHAIN: '{exe}' found - build/run.bat will work", "PREFLIGHT")
+        return True
+    log(f"TOOLCHAIN MISSING: '{exe}' is not on PATH, but LANGUAGE is {primary}.", "PREFLIGHT")
+    log(f"  The team will still generate {primary} source, and build/run.bat will", "PREFLIGHT")
+    log(f"  contain: {run_cmd}", "PREFLIGHT")
+    log(f"  ...but running it will fail with \"'{exe}' is not recognized\" until you install it:", "PREFLIGHT")
+    for line in how.splitlines():
+        log(f"    {line}", "PREFLIGHT")
+    log("  (Reopen the terminal after installing so PATH refreshes.)", "PREFLIGHT")
+    return False
+
 def preflight_models():
     """Check /api/tags at startup so a missing model surfaces as a clear
     'ollama pull X' instruction once, instead of a generic 'Call failed'
@@ -504,6 +539,72 @@ def folder_for_role(role):
         return "audio"
     return "code"
 
+def scope_max_tasks(gdd_text=""):
+    """Scope cap from the GDD/MEMORY text. Hoisted out of the worker loop so the
+    coverage gate (Audit13) can use the same number the cap uses."""
+    blob = (gdd_text or "") + " " + read_file(MEMORY_FILE) + " " + read_file(GDD_FILE)
+    blob = blob.lower()
+    if "large (50" in blob or "50 tasks" in blob:
+        return 50
+    if "small (10" in blob:
+        return 10
+    return 25
+
+def gdd_features(gdd_text):
+    """Parse the FEATURES: block of the GDD into individual feature names.
+
+    Used by feature_coverage() below. Handles the two shapes the GUI and humans
+    actually write:  '- Tether System: elastic cord physics'  and plain lines.
+    Stops at the next ALLCAPS heading (TECH:, ART BIBLE:, CORE LOOP:, ...).
+    """
+    feats, in_block = [], False
+    for line in gdd_text.splitlines():
+        s = line.strip()
+        if re.match(r"^(FEATURES|KEY FEATURES|CORE SYSTEMS[^:]*)\s*:", s, re.I):
+            in_block = True
+            continue
+        if in_block:
+            if re.match(r"^[A-Z][A-Z /&-]{2,}\s*:", s) or s.startswith("#") or s.startswith("---"):
+                break
+            s = s.lstrip("-*0123456789. ").strip()
+            if not s:
+                continue
+            name = s.split(":")[0].strip()
+            if 2 < len(name) <= 60:
+                feats.append(name)
+    return feats
+
+def feature_coverage(gdd_text):
+    """Return (covered, missing) GDD features based on filenames in output/.
+
+    FIX (Audit13): the build trigger only required `len(existing_files) >= 1`,
+    so the moment AURA returned [] with two or three fragments on disk the
+    system compiled, wrote DONE and went idle - reporting a finished game that
+    implemented 2 of the GDD's 9 systems. The scope cap (10/25/50) is an UPPER
+    bound only; nothing ever asserted a LOWER bound. This is that lower bound.
+    Matching is deliberately loose (significant word overlap) because worker
+    filenames are truncated to 30 chars.
+    """
+    feats = gdd_features(gdd_text)
+    if not feats:
+        return [], []
+    names = []
+    if OUTPUT_DIR.exists():
+        for f in OUTPUT_DIR.rglob("*.*"):
+            names.append(re.sub(r"[^a-z0-9]+", " ", f.stem.lower()))
+    blob = " ".join(names)
+    stop = {"system","the","and","for","with","a","of","to","in","manager","mode"}
+    covered, missing = [], []
+    for feat in feats:
+        words = [w for w in re.sub(r"[^a-z0-9]+", " ", feat.lower()).split()
+                 if w not in stop and len(w) > 2]
+        if not words:
+            covered.append(feat)
+            continue
+        hits = sum(1 for w in words if w[:8] in blob)
+        (covered if hits >= max(1, len(words) // 2) else missing).append(feat)
+    return covered, missing
+
 def snapshot_gdd(reason="change"):
     """Archive every GDD state that triggers a (re)build so each rebuild is
     attributable to the edit that caused it. GDD itself stays read-only -
@@ -715,6 +816,7 @@ def main():
     log(f"Team: {', '.join([f'{k}={v}' for k,v in TEAM.items()])}", "INFO")
     log("==================================================", "START")
     preflight_models()
+    preflight_toolchain(primary, run_cmd)  # FIX (Audit13): warn about missing g++/dotnet/cargo up front
 
     tasks = []
     if TASKS_FILE.exists():
@@ -743,6 +845,8 @@ def main():
     # workers. Replan only when the GDD actually changed, or the queue is empty.
     idle_watch = False  # N1: lightweight IDLE - no LLM calls while watching
     idle_ticks = 0      # Audit10: heartbeat counter for the idle-watch state
+    coverage_stalls = 0 # Audit13: consecutive cycles the coverage gate held with no progress
+    coverage_best = -1  # Audit13: highest feature-coverage count seen so far
     last_gdd_mtime = 0
     try:
         if STATE_FILE.exists():
@@ -859,11 +963,48 @@ def main():
             titles_list = ", ".join(list(existing_titles)[:20]) if existing_titles else "none"
             completed_str = "\n".join([f"- {t['title']} [{t['role']}]" for t in tasks if t.get("status")=="done"][-15:]) or "None yet"
 
+            # FIX (Audit13) PREMATURE FINISH: hold the build until the GDD's
+            # FEATURES are actually represented in output/. Without this the
+            # system compiled as soon as the queue momentarily emptied - even
+            # with 2 fragments against a 9-feature GDD - then wrote DONE and
+            # idled, reporting a "finished" game that implemented almost none
+            # of the design. We do not block forever: once the scope cap is hit
+            # (or coverage is good enough) the build proceeds regardless.
+            _covered, _missing = feature_coverage(gdd_text)
+            _done_n = len([t for t in tasks if t.get("status") == "done"])
+            coverage_hold = False
+            # Bounded: if the planner cannot close the gap after N consecutive
+            # attempts (it keeps proposing titles that dedup rejects, or simply
+            # returns []), stop holding and let the build proceed with what we
+            # have. A partial build the user can inspect beats an infinite hold
+            # - the whole point of SAFEGUARDS #8.
+            if _missing and _done_n < scope_max_tasks(gdd_text) and coverage_stalls < 6:
+                coverage_hold = True
+                coverage_stalls += 1
+                if len(_covered) > coverage_best:
+                    coverage_best = len(_covered)
+                    coverage_stalls = 0   # real progress - reset the patience budget
+                log(f"Coverage {len(_covered)}/{len(_covered)+len(_missing)} GDD features - "
+                    f"still missing: {', '.join(_missing[:6])}"
+                    f"{' ...' if len(_missing) > 6 else ''} - not finishing yet", "COVERAGE")
+                # Feed the gap straight back to AURA so it plans the right work.
+                inbox_directive_global = (
+                    (inbox_directive_global + " | " if inbox_directive_global else "")
+                    + "STILL MISSING these GDD features, plan them next: "
+                    + ", ".join(_missing[:8]))
+            elif _missing and coverage_stalls >= 6:
+                log(f"Coverage gate giving up after {coverage_stalls} stalled cycles - "
+                    f"building with {len(_covered)}/{len(_covered)+len(_missing)} features. "
+                    f"Missing: {', '.join(_missing[:6])}. Edit the GDD to be more specific, "
+                    f"or send a directive naming them.", "COVERAGE")
+
             # INTEGRATOR / COMPILE - Guaranteed finish
             should_build = False
             # Also check any main.* exists
             any_main = any((BUILD_DIR / f"main{e}").exists() for e in [".py",".cpp",".cs",".lua",".gd",".rs",".js",".ts"])
-            if len(pending) == 0 and len(existing_files) >= 1:
+            if coverage_hold:
+                pass  # skip the build trigger this cycle; AURA plans the gap
+            elif len(pending) == 0 and len(existing_files) >= 1:
                 if not any_main:
                     should_build = True
                     log(f"Build missing main.* but have {len(existing_files)} fragments - triggering compile", "BUILD")

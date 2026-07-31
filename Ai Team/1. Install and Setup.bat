@@ -1,5 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
+:: FIX (Audit13): pin CWD to this script's folder so relative paths work
+cd /d "%~dp0"
 title 1. INSTALL and SETUP - Ai Team
 color 0A
 
@@ -98,6 +100,17 @@ ollama list
 where python
 python --version 2>nul || py --version
 
+
+echo.
+echo [OPTIONAL] Compiler check for non-Python projects
+echo   Your GDD's LANGUAGE field decides what build/run.bat will call.
+echo   Python needs nothing extra. Other languages need a toolchain:
+where g++ >nul 2>&1    && (echo   [OK] g++ found    - C++ builds can run) || (echo   [--] g++ MISSING  - C++: winget install -e --id MSYS2.MSYS2  ^(then pacman -S mingw-w64-ucrt-x86_64-gcc^))
+where dotnet >nul 2>&1 && (echo   [OK] dotnet found - C# builds can run)  || (echo   [--] dotnet MISSING - C#: winget install -e --id Microsoft.DotNet.SDK.8)
+where cargo >nul 2>&1  && (echo   [OK] cargo found  - Rust builds can run) || (echo   [--] cargo MISSING  - Rust: winget install -e --id Rustlang.Rustup)
+where node >nul 2>&1   && (echo   [OK] node found   - JS/TS builds can run) || (echo   [--] node MISSING   - JS/TS: winget install -e --id OpenJS.NodeJS.LTS)
+echo   Install only what your project needs, then REOPEN this window.
+echo.
 echo ================================================
 echo  SETUP COMPLETE - 6 models installed
 echo ================================================

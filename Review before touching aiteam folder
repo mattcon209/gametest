@@ -6,7 +6,7 @@ Method: read every file, trace against Audits 1–5 + spec docs, then PROVE ever
 claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 ================================================================================
 
->>> CURRENT STATE: PART 12 is the newest section — read it first.
+>>> CURRENT STATE: PART 13 is the newest section — read it first.
 >>> This file is append-only and layered. Later parts supersede earlier ones:
 >>>   Parts 0–5  v6.7 fix-round report (written at 537af98)
 >>>   Part 6     independent audit #6 + repair (at 470cf20)
@@ -15,11 +15,12 @@ claim by execution (mock-Ollama end-to-end runs, stress tests, unit assertions).
 >>>   Part 9     audit round 9 + repair (at 74b0164)
 >>>   Part 10    independent audit #10 + hardening (at 1cb94e8)
 >>>   Part 11    audit round 11 + repair (at cae3a3e)
->>>   Part 12    C++ readiness pass - RUN-BREAKER FOUND (at HEAD) <- CURRENT
+>>>   Part 12    C++ readiness pass - RUN-BREAKER FOUND (at 00beb68)
+>>>   Part 13    FIRST REAL-RUN FEEDBACK - 3 fixes (at HEAD) <- CURRENT
 >>> Each part re-verified the one before it by execution. Where they disagree,
 >>> the HIGHER-numbered part is newer and was re-tested.
->>> Before changing anything read: 12.1 (the duplicate-id run-breaker),
->>> 12.3 (still open), 6.5 + 8.5 + 10.5 (standing advice).
+>>> Before changing anything read: 13.1 (real-run failures + fixes),
+>>> 13.3 (still open), 6.5 + 8.5 + 10.5 (standing advice).
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -1030,7 +1031,7 @@ V4  PYTHON REGRESSION e2e: 6 tasks done attempts=1, real build/main.py,
 
 ================================================================================
 ================================================================================
-PART 12 — C++ READINESS PASS (newest section) — RUN-BREAKER FOUND
+PART 12 — C++ READINESS PASS (audited 00beb68) — RUN-BREAKER FOUND
 Auditor: Arena agent (author of Audits 1-8, 10)
 Trigger: the owner's first real project is C++ heavy (Budget Bodyguards), and
 every prior audit had been driven with a Python GDD.
@@ -1123,4 +1124,108 @@ README.md, DONE, test_results.txt. run.bat holds
 16. Any lookup of the form `if x.get("id") == other.get("id"): break` assumes
     uniqueness. If ids can come from an LLM, they are not unique. Treat every
     model-supplied identifier as hostile.
+================================================================================
+
+
+================================================================================
+================================================================================
+PART 13 — FIRST REAL-RUN FEEDBACK (newest section)
+Source: the owner ran the system on real hardware with real Ollama models and
+reported three failures. Every item here came from an ACTUAL run, not a mock.
+That makes this the most valuable feedback the project has received.
+================================================================================
+
+13.0 — WHAT THE USER REPORTED
+--------------------------------------------------------------------------------
+  1. "The GUI doesn't work like at all."
+  2. "It only made a couple of files then made a build?"
+  3. "The build couldn't even be ran - g++ not recognized."
+
+All three reproduced and fixed. None of them were visible to any mock-based
+audit, because all three live at the boundary between the orchestrator and the
+actual Windows machine.
+
+13.1 — THE THREE FAILURES
+--------------------------------------------------------------------------------
+A. GUI DEAD ON LAUNCH  (.bat files did not pin the working directory)
+   gui.py itself is fine - it constructs, refreshes, and detects correctly when
+   driven headless with a stubbed Tk. The problem was the launcher: every .bat
+   ran `python gui.py` with NO `cd` first, so launching from a shortcut, an
+   elevated shell, or any Explorer context where CWD != the Ai Team folder made
+   every relative path resolve somewhere else. The window then opened wrong or
+   closed instantly with the traceback scrolling past.
+   FIX: `cd /d "%~dp0"` in ALL FOUR .bat files. The GUI launcher additionally
+   detects python vs py, verifies gui.py is present, and on a non-zero exit
+   prints a readable message (incl. the common "Python installed without
+   tkinter" cause) instead of vanishing.
+
+B. BUILT AFTER ONLY A COUPLE OF FILES  (no lower bound on completeness)
+   The build trigger was `if len(pending)==0 and len(existing_files) >= 1`.
+   AURA plans 3-5 tasks; once those finish the queue empties, and dedup then
+   makes AURA answer "[]" because the few titles it just made already exist.
+   Result: INTEGRATOR fires with 2-4 fragments against a 9-feature GDD, writes
+   DONE, and goes idle - reporting a finished game that implements almost none
+   of the design. The scope cap (10/25/50) is an UPPER bound only; nothing ever
+   asserted a LOWER bound.
+   FIX: gdd_features() parses the GDD's FEATURES block; feature_coverage()
+   compares it against filenames in output/. While features are missing the
+   build is HELD and the gap is injected into AURA's next planning prompt
+   ("STILL MISSING these GDD features, plan them next: ...").
+   BOUNDED ON PURPOSE: if coverage does not improve for 6 consecutive cycles
+   the gate gives up, logs exactly what is missing and why, and builds anyway.
+   A partial build you can inspect beats an infinite hold (SAFEGUARDS #8).
+   VERIFIED: with a deliberately lazy mock director, coverage went 0/9 -> 4/9,
+   held while progressing, then gave up cleanly and produced main.cpp + DONE.
+
+C. "g++ IS NOT RECOGNIZED"  (no toolchain anywhere in setup or preflight)
+   1. Install and Setup.bat installs Python + Ollama + 6 models and NOTHING
+   else. There was no compiler check in the installer, in studio.py, or in the
+   smoke test. So a C++ project completed "successfully", wrote a run.bat
+   containing `g++ main.cpp -o game.exe`, and died on the user's machine.
+   The generated code was fine - the machine simply could not compile it.
+   FIX 1: preflight_toolchain() runs at STARTUP, right after the model
+   preflight. If LANGUAGE needs g++/dotnet/cargo/node/godot and it is not on
+   PATH, it says so immediately, shows the exact run.bat command that will
+   fail, and prints the winget install line. Python is exempt.
+   FIX 2: the installer now ends with an optional compiler section reporting
+   [OK]/[--] for g++, dotnet, cargo and node with install commands.
+   NOTE: this is a WARNING, not a blocker. The team still generates C++; you
+   just find out at second 5 instead of at the finish line.
+
+13.2 — VERIFICATION
+--------------------------------------------------------------------------------
+V1  gui.py driven headless with a stubbed tkinter: module loads, AiTeamGUIv2
+    constructs, refresh_all / generate_gdd_from_gui / continue_project /
+    install_check all run. Confirms the GUI logic was never the problem.
+V2  All four .bat files contain `cd /d "%~dp0"`.
+V3  gdd_features() on the real Budget Bodyguards GDD: parses all 9 systems.
+    feature_coverage() with 3 fragments: correctly reports 5 covered / 4 missing.
+V4  Full C++ e2e with a lazy director: gate held, then gave up after 6 stalls
+    and produced build/main.cpp + run.bat + README.md + DONE.
+V5  preflight_toolchain('cpp') with g++ absent: emits the full warning block.
+V6  Python regression: unique ids, complete finish package, SMOKE ALL PASS.
+V7  pyflakes 0 across studio.py + gui.py + tools/smoke_check.py.
+
+13.3 — STILL OPEN
+--------------------------------------------------------------------------------
+· INTEGRATOR emits #include "engine/core.h" style headers without guaranteeing
+  those files exist (carried from 12.3). If a real C++ build compiles but will
+  not LINK, this is the first place to look.
+· Coverage matching is filename-based and deliberately loose. A feature can be
+  marked covered by a file that merely NAMES it. It is a completeness floor,
+  not a correctness check.
+· smoke_check still compiles .py only; .cpp gets fence/<think>/non-trivial
+  checks but no g++ syntax pass.
+· Everything from 12.3 / 10.4 still applies.
+
+13.4 — ADVICE
+--------------------------------------------------------------------------------
+17. Real-run feedback outranks every audit. Nine "clean" audits and two
+    mock-driven C++ passes did not surface any of these three, because all
+    three live where the orchestrator meets the actual machine: the shell that
+    launches it, the compiler on PATH, and the human judgment of "is this
+    actually finished?". Ask the user what broke; do not infer it.
+18. "It finished" is not the same as "it did the work". The DONE flag proved
+    only that INTEGRATOR ran. Any future completion signal should be measured
+    against the GDD, not against an empty queue.
 ================================================================================

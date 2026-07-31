@@ -1,5 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
+:: FIX (Audit13): pin CWD to this script's folder so relative paths work
+cd /d "%~dp0"
 title 2. START TEAM - Live Scrolling Log - Ai Team
 color 0B
 
